@@ -31,17 +31,48 @@ function stripTrailingDots(t: string): string {
 export const splitIntoTopics = (raw: string): NotesTopic[] => {
   if (!raw) return [];
 
-  let text = raw;
+  // Strip TTS sync markers like [span_0](start_span) / [span_0](end_span)
+  let text = raw.replace(/\[span_\d+\]\((start|end)_span\)/g, '');
+  let _isFromHtml = false;
   if (/[<][a-zA-Z!\/]/.test(text)) {
+    _isFromHtml = true;
     text = text
       .replace(/<\s*br\s*\/?\s*>/gi, '\n')
       .replace(/<\/\s*(p|div|li|h[1-6]|tr|section|article)\s*>/gi, '\n')
       .replace(/<\s*li[^>]*>/gi, '\n* ')
       .replace(/<\s*h[1-6][^>]*>/gi, '\n### ');
     text = stripHtml(text);
+    // For HTML-derived text, collapse regular line breaks into spaces so that
+    // only sentence terminators (। and .) create new topic lines, not every <p>/<br>.
+    // Lines that start heading/bullet markers are preserved as real line breaks.
+    text = text
+      .split('\n')
+      .reduce((acc: string[], line: string, idx: number) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          // Empty line = paragraph separator — preserve as real break
+          acc.push('');
+          return acc;
+        }
+        const startsSpecial = /^(#{1,6}\s|[*\-•]|\d+[.)]\s)/.test(trimmed);
+        if (startsSpecial || acc.length === 0) {
+          acc.push(line);
+        } else {
+          // Append to previous line with a space (collapse HTML-induced line break)
+          acc[acc.length - 1] = (acc[acc.length - 1] || '').trimEnd() + ' ' + trimmed;
+        }
+        return acc;
+      }, [])
+      .join('\n');
   }
 
   text = text.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
+  // Merge common dot-abbreviations so they don't get split mid-word
+  text = text
+    .replace(/ई\.पू\./g, 'ईपू')
+    .replace(/ई\.स\./g, 'ईस')
+    .replace(/पू\.क्र\./g, 'पूक्र');
 
   const rawLines = text.split(/\r?\n/);
   const topics: NotesTopic[] = [];
@@ -135,15 +166,21 @@ export const splitIntoTopics = (raw: string): NotesTopic[] => {
   // Section markers that should each START a new topic line.
   const SECTION_MARKERS = /(?=(?:PART|UNIT|CHAPTER|SECTION|SET|MODEL\s*SET)\s*[-–]?\s*\d+\s*[:.)])|(?=\([A-Z][A-Z\s\/]{2,}\)\s*[:.)])|(?=📝|🎯|✏️|📌|⭐|💡|🔥|✨|📚|🎓|⚡)/g;
 
+  // Numbered inline items: "...Kharvel 1 Hathi Gumpha... 2 Junagarh..."
+  // Splits before a digit (1–99) that comes after text and is followed by
+  // an uppercase/Devanagari letter or opening paren — i.e. a new list item.
+  const INLINE_NUMBER_BOUNDARY =
+    /(?<=[A-Za-z\u0900-\u097F)\]%'"])\s+(?=\d{1,2}[.\s]\s*[A-Z\u0900-\u097F(])/g;
+
   const splitOneTopic = (raw: string): string[] => {
     let out: string[] = [raw];
     // 1. Hindi danda — always a sentence boundary.
     out = out.flatMap(s => s.split(HINDI_DANDA_BOUNDARY));
-    // 2. English sentence-end split (. ! ?)
-    out = out.flatMap(s => s.split(ENGLISH_SENTENCE_BOUNDARY));
-    // 3. Section-marker split (for any fragment still > ~80 chars; we also
-    //    catch leading inline labels like "PART 1:" / "🎯 EXAM SPECIAL" that
-    //    survived the first two passes).
+    // 2. English sentence-end split (. ! ?) — DISABLED for "." to avoid
+    //    breaking abbreviations like "ई.पू." or dates like "1857." etc.
+    //    Only ! and ? are used for English splits now.
+    out = out.flatMap(s => s.split(/(?<=[!?])\s+(?=[A-Z\u0900-\u097F0-9(\-•*"'\u2013\u2014\u2018\u201C\uD83C-\uDBFF\u2600-\u27BF])/g));
+    // 3. Section-marker split (for any fragment still > ~80 chars).
     out = out.flatMap(s => (s.length > 80 ? s.split(SECTION_MARKERS) : [s]));
     return out.map(s => s.trim()).filter(Boolean);
   };

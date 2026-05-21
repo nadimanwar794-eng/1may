@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Gift, Gamepad2, CreditCard, Crown, History, BrainCircuit, Award, Trophy, Mail, User, ChevronRight, LogOut, FileClock, Download } from 'lucide-react';
+import { X, Gift, Gamepad2, CreditCard, Crown, History, BrainCircuit, Award, Trophy, Mail, User, ChevronRight, LogOut, FileClock, Download, Palette } from 'lucide-react';
 import { StudentTab, User as UserType, SystemSettings } from '../types';
 
 interface Props {
@@ -30,6 +30,9 @@ export const StudentSidebar: React.FC<Props> = ({ isOpen, onClose, onNavigate, u
         { id: 'PRIZES', icon: Award, label: 'Prizes', color: 'text-purple-600', featureId: 'f6', category: 'FUN' },
         { id: 'LEADERBOARD', icon: Trophy, label: 'Leaderboard', color: 'text-yellow-500', featureId: 'f5', category: 'FUN' },
 
+        // --- CREATIVE ---
+        { id: 'THEME_BUILDER' as StudentTab, icon: Palette, label: 'My Theme Studio', color: 'text-violet-600', category: 'CREATIVE' },
+
         // --- ACCOUNT ---
         { id: 'PROFILE', icon: User, label: 'My Profile', color: 'text-slate-800', featureId: 'f13', category: 'ACCOUNT' },
     ];
@@ -44,6 +47,7 @@ export const StudentSidebar: React.FC<Props> = ({ isOpen, onClose, onNavigate, u
         'LEARNING': menuItems.filter(i => i.category === 'LEARNING'),
         'PREMIUM': menuItems.filter(i => i.category === 'PREMIUM'),
         'FUN': menuItems.filter(i => i.category === 'FUN'),
+        'CREATIVE': menuItems.filter(i => i.category === 'CREATIVE'),
         'ACCOUNT': menuItems.filter(i => i.category === 'ACCOUNT'),
     };
 
@@ -79,7 +83,7 @@ export const StudentSidebar: React.FC<Props> = ({ isOpen, onClose, onNavigate, u
 
                 {/* Menu Items (Categorized) */}
                 <div className="flex-1 overflow-y-auto py-2 px-3 space-y-4">
-                    {['LEARNING', 'PREMIUM', 'FUN', 'ACCOUNT'].map(cat => {
+                    {['LEARNING', 'PREMIUM', 'FUN', 'CREATIVE', 'ACCOUNT'].map(cat => {
                         const items = groupedItems[cat];
                         if (!items || items.length === 0) return null;
 

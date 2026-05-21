@@ -3,7 +3,6 @@ import { User } from '../../types';
 export const SubscriptionEngine = {
     isPremium: (user: User): boolean => {
         if (!user.isPremium) return false;
-        if (user.subscriptionTier === 'LIFETIME') return true;
         if (!user.subscriptionEndDate) return false;
         return new Date(user.subscriptionEndDate) > new Date();
     },
@@ -25,8 +24,7 @@ export const SubscriptionEngine = {
         const userLevel = user.subscriptionLevel || 'BASIC';
 
         if (requiredTier === 'ULTRA') {
-            // Only Ultra users or Lifetime/Yearly (if mapped to Ultra) can access
-            return userLevel === 'ULTRA' || user.subscriptionTier === 'LIFETIME' || user.subscriptionTier === 'YEARLY';
+            return userLevel === 'ULTRA';
         }
 
         // Basic Access (Basic or Ultra can access)

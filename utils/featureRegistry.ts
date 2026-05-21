@@ -356,9 +356,9 @@ export const ALL_FEATURES: Feature[] = [
         label: 'Competition Mode',
         group: 'CONTENT',
         surfaceLevel: 2,
-        requiredSubscription: 'ULTRA',
+        requiredSubscription: 'FREE',
         adminVisible: true,
-        description: 'High-level content for exams.'
+        description: 'High-level content for exams. Free: 3 topics/day, Ultra: unlimited.'
     },
     {
         id: 'DOWNLOAD_PDF',
@@ -531,6 +531,17 @@ export const ALL_FEATURES: Feature[] = [
         color: 'orange'
     },
     {
+        id: 'ADMIN_GLOBAL_CHAT',
+        label: 'Chat Hub',
+        group: 'REQUESTS',
+        surfaceLevel: 3,
+        adminVisible: true,
+        adminTab: 'GLOBAL_CHAT',
+        requiredPermission: 'VIEW_DEMANDS',
+        icon: 'MessageSquare',
+        color: 'blue'
+    },
+    {
         id: 'ADMIN_ACCESS',
         label: 'Login Requests',
         group: 'REQUESTS',
@@ -618,8 +629,19 @@ export const ALL_FEATURES: Feature[] = [
         adminVisible: true,
         adminTab: 'HOMEWORK_MANAGER',
         requiredPermission: 'MANAGE_CONTENT',
-        icon: 'BookOpen',
+        icon: 'ClipboardList',
         color: 'indigo'
+    },
+    {
+        id: 'ADMIN_BOOK_NOTES',
+        label: 'Book Notes',
+        group: 'CONTENT',
+        surfaceLevel: 3,
+        adminVisible: true,
+        adminTab: 'BOOK_NOTES_MANAGER',
+        requiredPermission: 'MANAGE_CONTENT',
+        icon: 'BookMarked',
+        color: 'amber'
     },
     {
         id: 'ADMIN_DAILY_GK',
@@ -631,6 +653,17 @@ export const ALL_FEATURES: Feature[] = [
         requiredPermission: 'MANAGE_CONTENT',
         icon: 'Book',
         color: 'teal'
+    },
+    {
+        id: 'ADMIN_TRENDING_NOTES',
+        label: 'Trending Notes',
+        group: 'CONTENT',
+        surfaceLevel: 3,
+        adminVisible: true,
+        adminTab: 'TRENDING_NOTES_MANAGER',
+        requiredPermission: 'MANAGE_CONTENT',
+        icon: 'TrendingUp',
+        color: 'amber'
     },
     {
         id: 'ADMIN_SYLLABUS',
@@ -736,6 +769,17 @@ export const ALL_FEATURES: Feature[] = [
         requiredPermission: 'MANAGE_SETTINGS',
         icon: 'Calendar',
         color: 'rose'
+    },
+    {
+        id: 'ADMIN_EFFECTS',
+        label: 'Animations',
+        group: 'NSTA_CONTROL',
+        surfaceLevel: 3,
+        adminVisible: true,
+        adminTab: 'CONFIG_EFFECTS',
+        requiresSuperAdmin: true,
+        icon: 'Sparkles',
+        color: 'violet'
     },
     {
         id: 'ADMIN_GENERAL',
@@ -902,6 +946,26 @@ export const ALL_FEATURES: Feature[] = [
     { id: 'UNIVERSAL_VIDEO', label: 'Universal Video', group: 'CONTENT', surfaceLevel: 2, adminVisible: true, description: 'Access to universal videos.' },
     { id: 'PREMIUM_AUDIO', label: 'Premium Audio', group: 'CONTENT', surfaceLevel: 2, adminVisible: true, description: 'Access to premium audio content.' },
     { id: 'AI_TUTOR', label: 'AI Tutor', group: 'AI', surfaceLevel: 2, adminVisible: true, description: 'Access to AI Tutor.' },
+    {
+        id: 'SETUP_RECOVERY',
+        label: 'Recovery Set करें',
+        group: 'CORE',
+        surfaceLevel: 3,
+        adminVisible: true,
+        icon: 'Lock',
+        color: 'orange',
+        description: 'Students ko apna recovery mobile/password set karne ki suvidha.'
+    },
+    {
+        id: 'RECOVERY_LOGIN',
+        label: 'Login via Recovery',
+        group: 'CORE',
+        surfaceLevel: 3,
+        adminVisible: true,
+        icon: 'KeyRound',
+        color: 'orange',
+        description: 'Login screen par Recovery se login karne ka option.'
+    },
 ];
 
 export const getFeaturesByGroup = (group: FeatureGroup, onlyAdmin: boolean = false) => {

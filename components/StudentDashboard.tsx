@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { TopBarEffectsLayer } from "../utils/topBarEffects";
 import {
   User,
   Subject,
@@ -12,6 +13,7 @@ import {
   MCQResult,
   LucentNoteEntry,
   AppNotification,
+  BroadcastRedeemCode,
 } from "../types";
 import {
   updateUserStatus,
@@ -21,9 +23,12 @@ import {
   rtdb,
   saveAiInteraction,
   saveDemandRequest,
+  saveCompareAnalytic,
+  subscribeToContentIndex,
 } from "../firebase";
+import type { ContentTypeStats, ContentIndexMap } from "../firebase";
 import { doc, onSnapshot } from "firebase/firestore";
-import { ref, query, limitToLast, onValue } from "firebase/database";
+import { ref, query, limitToLast, onValue, set } from "firebase/database";
 import {
   getSubjectsList,
   DEFAULT_APP_FEATURES,
@@ -31,19 +36,23 @@ import {
   LEVEL_UNLOCKABLE_FEATURES,
   LEVEL_UP_CONFIG,
   APP_VERSION,
+  STATIC_SYLLABUS,
+  DEFAULT_SUBJECTS,
 } from "../constants";
 import { ALL_FEATURES } from "../utils/featureRegistry";
 import { useAppLang, tApp } from "../utils/appLang";
 import { isHomeSectionVisible } from "../utils/homeSections";
 import { checkFeatureAccess } from "../utils/permissionUtils";
-import { downloadAsMHTML } from "../utils/downloadUtils";
+import { downloadAsMHTML, downloadAsHTML, downloadElementAsHTML } from "../utils/downloadUtils";
+import { recordLogin, updateSessionDuration, getLoginHistory, formatDuration, formatLoginTime, type LoginSession } from "../utils/loginHistory";
+import { getNewContentItems, markContentItemSeen, markAllContentItemsSeen, formatContentDate, type ContentNotifItem } from "../utils/contentNotifications";
 import { saveRecentHomework, getRecentHomeworks, removeRecentHomework, getRecentChapters, removeRecentChapter, saveRecentLucent, getRecentLucent, removeRecentLucent, markNoteFullyRead, getFullyReadMap, markReadToday, getReadingStreak, getReadDates, getBestReadingDay, getTodayItemCount, type RecentChapterEntry, type RecentHwEntry, type RecentLucentEntry, type StreakInfo, type BestDay } from "../utils/recentReads";
 import { SubscriptionEngine } from "../utils/engines/subscriptionEngine";
 import { RewardEngine } from "../utils/engines/rewardEngine";
 import { Button } from "./ui/Button"; // Design System
 import { getActiveChallenges } from "../services/questionBank";
 import { generateDailyChallengeQuestions } from "../utils/challengeGenerator";
-import { searchNotesByWords, type NoteSearchResult } from "../utils/noteSearcher";
+import { searchNotesByWords, searchNotesByTitle, type NoteSearchResult } from "../utils/noteSearcher";
 import { generateMorningInsight } from "../services/morningInsight";
 import { LessonActionModal } from "./LessonActionModal";
 import { PullToRefresh } from "./PullToRefresh";
@@ -67,6 +76,7 @@ import {
   Play,
   Pause,
   RotateCcw,
+  ExternalLink,
   MessageCircle,
   Gamepad2,
   Timer,
@@ -78,7 +88,6 @@ import {
   Check,
   Ban,
   Smartphone,
-  Monitor,
   Trophy,
   ShoppingBag,
   ArrowRight,
@@ -123,6 +132,7 @@ import {
   ChevronRight,
   ChevronLeft,
   Volume2,
+  VolumeX,
   Square,
   GraduationCap,
   Newspaper,
@@ -131,10 +141,15 @@ import {
   Users,
   Target,
   History as HistoryIcon,
+  GitCompare,
+  MoreVertical,
+  ChevronDown,
+  ChevronUp,
+  Trash2,
 } from "lucide-react";
-import { speakText, stopSpeech } from "../utils/textToSpeech";
+import { speakText, stopSpeech, stripHtml } from "../utils/textToSpeech";
 import { getMistakeBankSync, addMistakes, removeMistakeByQuestion } from "../utils/mistakeBank";
-import { isDesktopModeOn, setDesktopMode, applyDesktopModeFromStorage, rotateScreen } from "../utils/displayPrefs";
+import { rotateScreen, isRotatingForOrientation } from "../utils/displayPrefs";
 import { hapticLight, hapticMedium, hapticStrong } from "../utils/haptic";
 import { splitIntoTopics } from "../utils/notesSplitter";
 import { SubjectSelection } from "./SubjectSelection";
@@ -173,6 +188,10 @@ import { SpeakButton } from "./SpeakButton";
 import { McqSpeakButtons } from "./McqSpeakButtons";
 import { FlashcardMcqView } from "./FlashcardMcqView";
 import { ChunkedNotesReader } from "./ChunkedNotesReader";
+import { CompareView } from "./CompareView";
+import { FullBookCompare } from "./FullBookCompare";
+import { McqSearchView } from "./McqSearchView";
+import { TopicDirectoryView } from "./TopicDirectoryView";
 import { recordNoteStar, recordNoteUnstar, subscribeToTopNoteStars, hashTopic, NoteStarEntry } from "../services/noteStars";
 import { PerformanceGraph } from "./PerformanceGraph";
 import { StudentSidebar } from "./StudentSidebar";
@@ -181,6 +200,7 @@ import { ExplorePage } from "./ExplorePage";
 import { StudentHistoryModal } from "./StudentHistoryModal";
 import { generateDailyRoutine } from "../utils/routineGenerator";
 import { OfflineDownloads } from "./OfflineDownloads";
+import { ThemeAnimationBuilder } from "./ThemeAnimationBuilder";
 import { saveOfflineItem } from "../utils/offlineStorage";
 import { NotificationPrompt } from "./NotificationPrompt";
 // @ts-ignore
@@ -382,6 +402,27 @@ function formatVideoEmbed(url: string): string {
   return url;
 }
 
+const processHtmlForWriteMode = (html: string) => {
+    if (!html) return '';
+    try {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      tmp.querySelectorAll('table').forEach(tbl => {
+        const parent = tbl.parentElement;
+        if (!parent) return;
+        const parentCls = (parent.className || '');
+        if (parentCls.includes('table-container') || parentCls.includes('chnr-table-wrap')) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'chnr-table-wrap';
+        parent.insertBefore(wrap, tbl);
+        wrap.appendChild(tbl);
+      });
+      return tmp.innerHTML;
+    } catch {
+      return html;
+    }
+  };
+
 export const StudentDashboard: React.FC<Props> = ({
   user,
   dailyStudySeconds,
@@ -435,12 +476,113 @@ export const StudentDashboard: React.FC<Props> = ({
     return getFeatureAccess(featureId).hasAccess;
   };
 
+  // ── LOGIN SESSION TRACKING ────────────────────────────────────────────────
+  // Record login on mount, update duration on unmount or page-hide
+  useEffect(() => {
+    if (!user?.id) return;
+    recordLogin(user.id);
+    const handleHide = () => { try { updateSessionDuration(user.id); } catch {} };
+    window.addEventListener('pagehide', handleHide);
+    window.addEventListener('beforeunload', handleHide);
+    // Update duration every 2 min so last-seen time is fresh even without unload
+    const t = setInterval(() => { try { updateSessionDuration(user.id); } catch {} }, 2 * 60 * 1000);
+    return () => {
+      handleHide();
+      clearInterval(t);
+      window.removeEventListener('pagehide', handleHide);
+      window.removeEventListener('beforeunload', handleHide);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // ── BASIC USER: HTML Write-Mode Daily Quota ──────────────────────────────
+  const _isUltraUser   = user.isPremium && user.subscriptionLevel === 'ULTRA';
+  const _isBasicUser   = user.isPremium && user.subscriptionLevel === 'BASIC';
+  const _todayKey      = new Date().toISOString().split('T')[0];
+  const _basicHtmlKey  = `nst_basic_html_${user.id}_${_todayKey}`;
+  const BASIC_HTML_DAILY_LIMIT = settings?.basicHtmlDailyLimit ?? 3;
+  const _basicHtmlUsed = _isBasicUser
+    ? parseInt(localStorage.getItem(_basicHtmlKey) || '0', 10)
+    : 0;
+  const basicHtmlRemaining = Math.max(0, BASIC_HTML_DAILY_LIMIT - _basicHtmlUsed);
+  // canViewHtmlFree: Ultra always, Basic if still has free sessions today
+  const _canViewHtmlFree = _isUltraUser || (_isBasicUser && basicHtmlRemaining > 0);
+  // Called whenever a Basic user opens HTML view to consume one daily session
+  const _trackBasicHtmlOpen = () => {
+    if (!_isBasicUser) return;
+    localStorage.setItem(_basicHtmlKey, String(_basicHtmlUsed + 1));
+  };
+
+  // ── NEW CONTENT NOTIFICATIONS (Lucent / Competition pages) ───────────────
+  const _allLucentNotes = (settings?.lucentNotes || []) as LucentNoteEntry[];
+  const _newContentItems: ContentNotifItem[] = getNewContentItems(_allLucentNotes, user.id, 7);
+  const _newContentFiltered = _newContentItems.filter(item => {
+    if (item.requiredTier === 'ULTRA') return _isUltraUser || user.role === 'ADMIN';
+    if (item.requiredTier === 'BASIC') return _isUltraUser || _isBasicUser || user.role === 'ADMIN';
+    return true;
+  });
+  const _newContentCount = _newContentFiltered.length;
+
+  // ── HTML DOWNLOAD DAILY LIMITS ────────────────────────────────────────────
+  // Free=2/day, Basic=5/day, Ultra=10/day
+  const _dlHtmlKey   = `nst_dl_html_${user.id}_${_todayKey}`;
+  const _dlHtmlUsed  = parseInt(localStorage.getItem(_dlHtmlKey) || '0', 10);
+  const _dlHtmlLimit = user.role === 'ADMIN' ? 9999
+    : _isUltraUser ? (settings?.htmlDownloadLimitUltra ?? 10)
+    : _isBasicUser ? (settings?.htmlDownloadLimitBasic ?? 5)
+    : (settings?.htmlDownloadLimitFree ?? 2);
+  const _dlHtmlLeft  = Math.max(0, _dlHtmlLimit - _dlHtmlUsed);
+
+  /**
+   * Wraps any download call with daily limit enforcement.
+   * Returns false if blocked (limit hit), true if allowed.
+   */
+  const checkAndDoDownload = async (downloadFn: () => Promise<void> | void): Promise<boolean> => {
+    if (user.role === 'ADMIN') { await downloadFn(); return true; }
+    if (_dlHtmlUsed >= _dlHtmlLimit) {
+      showAlert(
+        `Aaj ke ${_dlHtmlLimit} HTML download complete ho gaye! 🔒 Kal vapas aao ya plan upgrade karo.\n\n` +
+        `Free: 2/day · Basic: 5/day · Ultra: 10/day`,
+        'WARNING'
+      );
+      return false;
+    }
+    try { localStorage.setItem(_dlHtmlKey, String(_dlHtmlUsed + 1)); } catch {}
+    await downloadFn();
+    return true;
+  };
+
   // === DISCOUNT EVENT LIVE / COOLDOWN STATE ===
   // Discount sirf "active window" (startsAt → endsAt) ke beech hi LIVE manaa
   // jayega. Cooldown phase (endsAt → resetAt) me prices wapas normal ho jate
   // hain aur ek "Coming Soon" banner dikhna chahiye. Ye dono flags hum yahaan
   // ek hi jagah derive karte hain taaki nav swap, banner, popup sab consistent
   // rahe.
+  const [cooldownTimeLeft, setCooldownTimeLeft] = React.useState<{days: number, hours: number, minutes: number, seconds: number} | null>(null);
+
+  React.useEffect(() => {
+    const event = settings?.specialDiscountEvent;
+    if (!event?.enabled || !event?.startsAt) {
+      setCooldownTimeLeft(null);
+      return;
+    }
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const start = new Date(event.startsAt).getTime();
+      const diff = start - now;
+      if (diff <= 0) {
+        setCooldownTimeLeft(null);
+      } else {
+        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+        const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+        setCooldownTimeLeft({ days, hours, minutes, seconds });
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [settings?.specialDiscountEvent?.enabled, settings?.specialDiscountEvent?.startsAt]);
+
   const { isDiscountLive, isDiscountCooldown, discountEvent } = React.useMemo(() => {
     const event = settings?.specialDiscountEvent;
     if (!event?.enabled) return { isDiscountLive: false, isDiscountCooldown: false, discountEvent: null };
@@ -455,13 +597,19 @@ export const StudentDashboard: React.FC<Props> = ({
         live = now >= start;
       } else {
         live = now >= start && now < end;
-        if (!live && now >= end && reset && now < reset) cooldown = true;
+        if (now < start) cooldown = true;
       }
     } else {
       live = true; // legacy events with no dates → treat as live
     }
     return { isDiscountLive: live, isDiscountCooldown: cooldown, discountEvent: event };
-  }, [settings?.specialDiscountEvent]);
+  }, [settings?.specialDiscountEvent, cooldownTimeLeft]);
+  const [topBarCreditFlip, setTopBarCreditFlip] = useState(true);
+  React.useEffect(() => {
+    if (!settings?.specialDiscountEvent?.enabled || (!isDiscountLive && !isDiscountCooldown)) return;
+    const id = window.setInterval(() => setTopBarCreditFlip(v => !v), 2000);
+    return () => window.clearInterval(id);
+  }, [settings?.specialDiscountEvent?.enabled, isDiscountLive, isDiscountCooldown]);
 
   // Auto-swap: jab discount LIVE ho, profile slot ko Universal Video se replace
   // karna hai, chaahe admin ne `universalVideoInTopBar` set kiya ho ya nahi.
@@ -528,6 +676,158 @@ export const StudentDashboard: React.FC<Props> = ({
       );
     }
   }, [user.isPremium, user.subscriptionEndDate]);
+
+  // --- STORE VISIT → MAILBOX DISCOUNT DELIVERY (login-streak based) ---
+  // Discount tier depends on user's LOGIN STREAK (number of consecutive login days):
+  //   streak >= 5  → 20% off
+  //   streak >= 3  → 15% off
+  //   streak >= 1  → 10% off (default / first login)
+  // One coupon per day max. Coupon is a valid REDEEM_CODE stored in user inbox.
+  useEffect(() => {
+    if (activeTab !== 'STORE') return;
+    const freshUser = (window as any).__dashUserRef?.current ?? user;
+    const isSubscribed = freshUser.isPremium && freshUser.subscriptionEndDate && new Date(freshUser.subscriptionEndDate) > new Date();
+    if (isSubscribed) return;
+    if (!freshUser?.id) return;
+    const today = new Date().toISOString().split('T')[0];
+
+    // Determine discount % based on login streak
+    const streak = freshUser.streak || 0;
+    const discountPct = streak >= 5
+      ? 20
+      : streak >= 3
+        ? 15
+        : (settings?.storeVisitDiscountPercent ?? 10);
+    const tierKey = streak >= 5 ? '5plus' : streak >= 3 ? '3plus' : '1';
+
+    // Helper: send discount coupon once per day per tier
+    const sendDiscount = (pct: number, tier: string) => {
+      const sentKey = `nst_store_disc${tier}_${freshUser.id}_${today}`;
+      if (localStorage.getItem(sentKey)) return;
+      const msgId = `store-disc-${tier}-${today}`;
+      const latestUser = (window as any).__dashUserRef?.current ?? freshUser;
+      const alreadyHas = (latestUser.inbox || []).some((m: any) => m.id === msgId);
+      if (alreadyHas) return;
+      const code = 'DISC' + Math.random().toString(36).toUpperCase().slice(2, 9);
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const discMsg: any = {
+        id: msgId,
+        text: `🎁 Store Discount — ${pct}% OFF!\n\n⬆️ Upgrade your plan and save today!\n\n🏷️ Your ${pct}% discount code:\n${code}\n\n⏰ Valid for 24 hours. Redeem in Store.`,
+        date: new Date().toISOString(),
+        read: false,
+        type: 'REDEEM_CODE',
+        redeemCode: code,
+        discountPercent: pct,
+        expiresAt,
+      };
+      const updatedInbox = [discMsg, ...(latestUser.inbox || [])];
+      handleUserUpdate({ ...latestUser, inbox: updatedInbox });
+      localStorage.setItem(sentKey, '1');
+    };
+
+    sendDiscount(discountPct, tierKey);
+  }, [activeTab, user?.id]);
+
+  // --- MCQ DAILY TRACKING HELPER ---
+  // Uses userRef.current (via __dashUserRef) to prevent stale closure overwriting inbox
+  const trackDailyMcqAnswer = (isCorrect: boolean) => {
+    try {
+      const freshUser = (window as any).__dashUserRef?.current ?? user;
+      const today = new Date().toISOString().split('T')[0];
+      const countKey = `nst_mcq_daily_total_${today}_${freshUser.id}`;
+      const correctKey = `nst_mcq_daily_correct_${today}_${freshUser.id}`;
+      const total = (parseInt(localStorage.getItem(countKey) || '0')) + 1;
+      const correct = (parseInt(localStorage.getItem(correctKey) || '0')) + (isCorrect ? 1 : 0);
+      localStorage.setItem(countKey, total.toString());
+      localStorage.setItem(correctKey, correct.toString());
+      // Check if prize should be triggered
+      const minMcq = settings?.mcqDailyMinimum ?? 50;
+      const mcqRules = (settings?.mcqRewardRules || []).filter((r: any) => r.enabled);
+      if (total < minMcq || mcqRules.length === 0) return;
+      const rewardKey = `nst_mcq_prize_triggered_${today}_${freshUser.id}`;
+      if (localStorage.getItem(rewardKey)) return;
+      const pct = total > 0 ? (correct / total) * 100 : 0;
+      const applicableRule = mcqRules
+        .filter((r: any) => pct >= r.minPercentage)
+        .sort((a: any, b: any) => b.minPercentage - a.minPercentage)[0];
+      if (!applicableRule) return;
+      localStorage.setItem(rewardKey, '1');
+      const expiryHours = settings?.rewardExpiryHours ?? 12;
+      const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000).toISOString();
+      const rewardMsg: any = {
+        id: `mcq-prize-${Date.now()}`,
+        text: `🎯 MCQ Prize! Aaj ${total} MCQs solve kiye aur ${pct.toFixed(0)}% score kiya!\n\n${applicableRule.label}`,
+        date: new Date().toISOString(),
+        read: false,
+        type: 'REWARD',
+        expiresAt,
+        reward: applicableRule.rewardType === 'COINS'
+          ? { type: 'COINS', amount: applicableRule.rewardAmount }
+          : { type: 'SUBSCRIPTION', subTier: applicableRule.rewardSubTier, subLevel: applicableRule.rewardSubLevel, durationHours: applicableRule.rewardDurationHours },
+      };
+      handleUserUpdate({ ...freshUser, inbox: [rewardMsg, ...(freshUser.inbox || [])] });
+      showAlert(`🎯 MCQ Prize! ${applicableRule.label}`, 'SUCCESS', 'Daily MCQ Reward!');
+    } catch (err) { console.warn('MCQ tracking failed:', err); }
+  };
+
+  // --- BROADCAST REDEEM CODE DELIVERY ---
+  useEffect(() => {
+    if (!settings?.broadcastRedeemCodes?.length || !user?.id) return;
+    const now = Date.now();
+    const deliveredKey = `nst_broadcast_delivered_${user.id}`;
+    const delivered: string[] = JSON.parse(localStorage.getItem(deliveredKey) || '[]');
+    const newDeliveries: string[] = [];
+    let updatedInbox = [...(user.inbox || [])];
+    let changed = false;
+
+    for (const bc of settings.broadcastRedeemCodes) {
+      if (delivered.includes(bc.id)) continue;
+      if (bc.expiresAt && new Date(bc.expiresAt).getTime() < now) continue;
+      // Check target tier
+      if (bc.targetTier && bc.targetTier !== 'ALL') {
+        const subLevel = user.subscriptionLevel;
+        const isFree = !user.isPremium;
+        if (bc.targetTier === 'FREE' && !isFree) continue;
+        if (bc.targetTier === 'BASIC' && subLevel !== 'BASIC') continue;
+        if (bc.targetTier === 'ULTRA' && subLevel !== 'ULTRA') continue;
+      }
+      // Already in inbox?
+      if (updatedInbox.some(m => m.id === `bc-${bc.id}`)) { newDeliveries.push(bc.id); continue; }
+
+      // Build type label
+      let typeLabel = '';
+      if (bc.type === 'CREDITS') typeLabel = `💰 ${bc.amount || 0} Credits`;
+      else if (bc.type === 'DISCOUNT') typeLabel = `🏷️ ${bc.discountPercent || 0}% Discount`;
+      else if (bc.type === 'SUBSCRIPTION') typeLabel = `⭐ ${bc.subTier || ''} ${bc.subLevel || ''} Subscription`;
+      else if (bc.type === 'CONTENT_UNLOCK') typeLabel = `🔓 Content Unlock`;
+      else if (bc.type === 'TOPBAR_EFFECT_COLOR') typeLabel = `🎨 Special Color Effect`;
+      else if (bc.type === 'TOPBAR_EFFECT_ID') typeLabel = `✨ Animation Effect`;
+
+      const expiryHours = bc.durationHours || 72;
+      const expiresAt = new Date(now + expiryHours * 60 * 60 * 1000).toISOString();
+
+      const inboxMsg: any = {
+        id: `bc-${bc.id}`,
+        text: `${bc.title || '🎁 Admin ka Special Gift!'}\n\n${bc.message}\n\n🎁 Reward: ${typeLabel}`,
+        date: new Date().toISOString(),
+        read: false,
+        type: 'REDEEM_CODE',
+        redeemCode: bc.code,
+        expiresAt,
+      };
+      updatedInbox = [inboxMsg, ...updatedInbox];
+      newDeliveries.push(bc.id);
+      changed = true;
+    }
+
+    if (changed) {
+      const updatedUser = { ...user, inbox: updatedInbox };
+      handleUserUpdate(updatedUser);
+    }
+    if (newDeliveries.length > 0) {
+      localStorage.setItem(deliveredKey, JSON.stringify([...delivered, ...newDeliveries]));
+    }
+  }, [settings?.broadcastRedeemCodes, user?.id]);
 
   // --- POPUP LOGIC (EXPIRY WARNING, UPSELL, AND EVENT) ---
   useEffect(() => {
@@ -715,6 +1015,78 @@ export const StudentDashboard: React.FC<Props> = ({
     title?: string;
     message: string;
   }>({ isOpen: false, type: "INFO", message: "" });
+
+  // CUSTOM CONFIRM DIALOG STATE
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
+
+  // FLOATING LOGO BUTTON DRAG STATE — uses Pointer Events API for reliable drag + tap on mobile
+  const [floatLogoPos, setFloatLogoPos] = useState<{ x: number; y: number } | null>(null);
+  const floatLogoMoved = useRef(false);
+  const floatLogoStartRef = useRef({ px: 0, py: 0, bx: 0, by: 0 });
+  const floatLogoBtnRef = useRef<HTMLButtonElement>(null);
+  const floatLogoPosRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Keep ref in sync with state so pointer handlers always read latest position
+  useEffect(() => { floatLogoPosRef.current = floatLogoPos; }, [floatLogoPos]);
+
+  useEffect(() => {
+    const btn = floatLogoBtnRef.current;
+    if (!btn) return;
+
+    const BTN_SIZE = 56;
+
+    const onDown = (e: PointerEvent) => {
+      e.preventDefault();
+      btn.setPointerCapture(e.pointerId);
+      const rect = btn.getBoundingClientRect();
+      const curPos = floatLogoPosRef.current;
+      const bx = curPos ? curPos.x : rect.left;
+      const by = curPos ? curPos.y : rect.top;
+      floatLogoMoved.current = false;
+      floatLogoStartRef.current = { px: e.clientX, py: e.clientY, bx, by };
+      if (!curPos) {
+        const next = { x: bx, y: by };
+        floatLogoPosRef.current = next;
+        setFloatLogoPos(next);
+      }
+    };
+
+    const onMove = (e: PointerEvent) => {
+      if (!btn.hasPointerCapture(e.pointerId)) return;
+      e.preventDefault();
+      const dx = e.clientX - floatLogoStartRef.current.px;
+      const dy = e.clientY - floatLogoStartRef.current.py;
+      // 8px threshold so tiny tremors don't cancel the tap
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) floatLogoMoved.current = true;
+      const next = {
+        x: Math.max(0, Math.min(window.innerWidth - BTN_SIZE, floatLogoStartRef.current.bx + dx)),
+        y: Math.max(0, Math.min(window.innerHeight - BTN_SIZE, floatLogoStartRef.current.by + dy)),
+      };
+      floatLogoPosRef.current = next;
+      setFloatLogoPos(next);
+    };
+
+    const onUp = (e: PointerEvent) => {
+      if (!btn.hasPointerCapture(e.pointerId)) return;
+      btn.releasePointerCapture(e.pointerId);
+    };
+
+    btn.addEventListener('pointerdown', onDown, { passive: false });
+    btn.addEventListener('pointermove', onMove, { passive: false });
+    btn.addEventListener('pointerup', onUp);
+    btn.addEventListener('pointercancel', onUp);
+
+    return () => {
+      btn.removeEventListener('pointerdown', onDown);
+      btn.removeEventListener('pointermove', onMove);
+      btn.removeEventListener('pointerup', onUp);
+      btn.removeEventListener('pointercancel', onUp);
+    };
+  }, []);
   const showAlert = (
     msg: string,
     type: "SUCCESS" | "ERROR" | "INFO" = "INFO",
@@ -794,6 +1166,24 @@ export const StudentDashboard: React.FC<Props> = ({
     return () => unsub();
   }, []);
 
+  // Listen for new global chat messages → red dot on community button
+  useEffect(() => {
+    const lastOpenKey = `nst_chat_last_open_${user.id}`;
+    const q = query(ref(rtdb, 'chat/universal'), limitToLast(1));
+    const unsub = onValue(q, (snap) => {
+      const data = snap.val();
+      if (!data) return;
+      const msgs = Object.values(data) as any[];
+      if (!msgs.length) return;
+      const latest = msgs[0] as any;
+      const lastOpen = localStorage.getItem(lastOpenKey) || '';
+      if (latest.userId !== user.id && latest.timestamp > lastOpen) {
+        setChatUnread(true);
+      }
+    });
+    return () => unsub();
+  }, [user.id]);
+
   const [testAttempts, setTestAttempts] = useState<Record<string, any>>(
     JSON.parse(localStorage.getItem(`nst_test_attempts_${user.id}`) || "{}"),
   );
@@ -866,6 +1256,15 @@ export const StudentDashboard: React.FC<Props> = ({
   const [newNameInput, setNewNameInput] = useState("");
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [showChat, setShowChat] = useState(false);
+  const [chatUnread, setChatUnread] = useState(false);
+  const [showMcqCommunityPopup, setShowMcqCommunityPopup] = useState(false);
+  const [mcqCommunityDraft, setMcqCommunityDraft] = useState<{question: string; options: [string,string,string,string]; correctAnswer: number; explanation: string} | null>(null);
+  const [lucentLessonsPage, setLucentLessonsPage] = useState(8);
+  const [lucentLessonCompare, setLucentLessonCompare] = useState<LucentNoteEntry | null>(null);
+  const [lucentLessonCompareTab, setLucentLessonCompareTab] = useState<'full' | 'topics'>('topics');
+  const [lessonCompareFullViewMode, setLessonCompareFullViewMode] = useState<'chunk' | 'html'>('chunk');
+  const [showFullBookCompare, setShowFullBookCompare] = useState(false);
+  const [showDemandModal, setShowDemandModal] = useState(false);
   const [isLayoutEditing, setIsLayoutEditing] = useState(false);
   const [showExpiryPopup, setShowExpiryPopup] = useState(false);
   const [showMonthlyReport, setShowMonthlyReport] = useState(false);
@@ -874,11 +1273,32 @@ export const StudentDashboard: React.FC<Props> = ({
   );
   const [showReferralPopup, setShowReferralPopup] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
+  const [bgTtsOn, setBgTtsOn] = useState(false);
+  const [rewardEffect, setRewardEffect] = useState<{ amount: number; label: string } | null>(null);
+  const triggerRewardEffect = (amount: number, label = 'Credits') => {
+    setRewardEffect({ amount, label });
+    setTimeout(() => setRewardEffect(null), 2400);
+  };
+  const [showDotsMenu, setShowDotsMenu] = useState(false);
+  const [showFeatureLimitsModal, setShowFeatureLimitsModal] = useState(false);
+  const [showRulesPage, setShowRulesPage] = useState(false);
+  const [showLoginHistory, setShowLoginHistory] = useState(false);
+  const [showContentNewSheet, setShowContentNewSheet] = useState(false);
+  const [showCreditsMini, setShowCreditsMini] = useState(false);
+  const [storeSubTab, setStoreSubTab] = useState<'STORE' | 'EARN'>('STORE');
+  const [inboxTab, setInboxTab] = useState<'MESSAGES' | 'UPDATES' | 'REWARDS'>('MESSAGES');
+  const [rewardSubTab, setRewardSubTab] = useState<'EARNED' | 'RULES' | 'HISTORY'>('EARNED');
+  const [rewardHistorySeenCount, setRewardHistorySeenCount] = useState<number>(() => {
+    const saved = localStorage.getItem(`nst_reward_hist_seen_${user?.id || ''}`);
+    return saved ? parseInt(saved, 10) : 0;
+  });
+  const [nowTick, setNowTick] = useState(Date.now());
   const [isDocFullscreen, setIsDocFullscreen] = useState(false);
   const rotateFullscreenRef = useRef(false);
+  const topBarScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const handler = () => {
-      if (rotateFullscreenRef.current) return;
+      if (rotateFullscreenRef.current || isRotatingForOrientation()) return;
       setIsDocFullscreen(!!document.fullscreenElement);
     };
     document.addEventListener('fullscreenchange', handler);
@@ -964,6 +1384,11 @@ export const StudentDashboard: React.FC<Props> = ({
 
       // Ensure swipe only activates if it starts within the top banner area (roughly top 100px)
       const target = e.target as HTMLElement;
+      // Ignore swipe gesture if touching a table, slider, or horizontal scrolling container (like .chnr-table-wrap)
+      if (target.closest('table') || target.closest('.chnr-table-wrap') || target.closest('.table-container') || target.closest('input[type="range"]')) {
+        isTouchingTopBar = false;
+        return;
+      }
       isTouchingTopBar = !!target.closest("#top-banner-container");
     };
 
@@ -1007,7 +1432,13 @@ export const StudentDashboard: React.FC<Props> = ({
       contentViewStep === 'PLAYER' &&
       (activeTab === 'PDF' || activeTab === 'MCQ' || activeTab === 'VIDEO' || (activeTab as any) === 'AUDIO');
     setIsTopBarHidden(inPlayer);
-  }, [activeTab, contentViewStep]);
+    // Competition mode: auto-hide all chrome when opening notes/MCQ
+    if (syllabusMode === 'COMPETITION' && inPlayer) {
+      setIsLandscapeUiHidden(true);
+    } else if (syllabusMode === 'COMPETITION' && !inPlayer) {
+      setIsLandscapeUiHidden(false);
+    }
+  }, [activeTab, contentViewStep, syllabusMode]);
 
   useEffect(() => {
     setFullScreen(true); // Always true to hide global header
@@ -1015,6 +1446,9 @@ export const StudentDashboard: React.FC<Props> = ({
 
   useEffect(() => {
     const handleFullscreenChange = () => {
+      // Rotation ke liye fullscreen request hoti hai — uss waqt floating
+      // buttons aur top bar hide nahi karna.
+      if (rotateFullscreenRef.current || isRotatingForOrientation()) return;
       setIsFullscreenMode(!!document.fullscreenElement);
     };
 
@@ -1052,29 +1486,116 @@ export const StudentDashboard: React.FC<Props> = ({
   const [requestData, setRequestData] = useState({
     subject: "",
     topic: "",
-    type: "PDF",
+    pageNo: "",
+    type: "PDF" as 'PDF' | 'VIDEO' | 'MCQ' | 'NOTES' | 'ANY',
+    note: "",
   });
   const [showAiModal, setShowAiModal] = useState(false);
   const [showHomeworkHistory, setShowHomeworkHistory] = useState(false);
   const [showSettingsSheet, setShowSettingsSheet] = useState(false);
   const [appLang, setAppLangState] = useAppLang();
-  const [desktopMode, setDesktopModeState] = useState<boolean>(() => isDesktopModeOn());
-  useEffect(() => { applyDesktopModeFromStorage(); }, []);
+  const [isRotateEnabled, setIsRotateEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem('nst_rotate_toggle') === '1'; } catch { return false; }
+  });
+  // Track real orientation so rotate button can show correct state
+  const [isLandscape, setIsLandscape] = useState<boolean>(() => {
+    try { return window.matchMedia('(orientation: landscape)').matches; } catch { return false; }
+  });
+  const [isLandscapeUiHidden, setIsLandscapeUiHidden] = useState(false);
+  const [isInternalImmersive, setIsInternalImmersive] = useState(false);
+  useEffect(() => {
+    setIsInternalImmersive(contentViewStep === 'PLAYER');
+  }, [contentViewStep]);
+  useEffect(() => {
+    try {
+      const mq = window.matchMedia('(orientation: landscape)');
+      const handler = (e: MediaQueryListEvent) => {
+        setIsLandscape(e.matches);
+        // Always show top bar when orientation changes
+        setIsTopBarHidden(false);
+        // Reset landscape UI hidden state on orientation change
+        setIsLandscapeUiHidden(false);
+      };
+      mq.addEventListener('change', handler);
+      return () => mq.removeEventListener('change', handler);
+    } catch {}
+  }, []);
   const [homeworkSubjectView, setHomeworkSubjectView] = useState<string | null>(null);
+  // Real-time content stats from Firebase content_index: key = "{board}_{classLevel}"
+  const [classContentStats, setClassContentStats] = useState<Record<string, ContentTypeStats>>({});
+  // Full raw index per class for subject-level breakdown: key = "{board}_{classLevel}"
+  const [classContentIndex, setClassContentIndex] = useState<Record<string, ContentIndexMap>>({});
   const [lucentCategoryView, setLucentCategoryView] = useState(false);
+  // Which book is selected inside the Lucent category view (null = book-selection screen)
+  const [selectedLucentBook, setSelectedLucentBook] = useState<string | null>(null);
   // Page-wise notes viewer for admin-added Lucent lessons
   const [lucentNoteViewer, setLucentNoteViewer] = useState<LucentNoteEntry | null>(null);
   const [lucentPageIndex, setLucentPageIndex] = useState(0);
+  const [lucentPageListViewer, setLucentPageListViewer] = useState<LucentNoteEntry | null>(null);
   // Live scroll % for the Lucent reader — drives the gradient progress bar at
   // the very top, mirroring Sar Sangrah / Speedy. Reset on page change.
   const [lucentScrollProgress, setLucentScrollProgress] = useState(0);
   const lucentScrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Subscribe to real-time content_index stats from Firebase for each class
+  useEffect(() => {
+    const board = user?.board || 'CBSE';
+    const classes = ['6','7','8','9','10','11','12','COMPETITION'];
+    const unsubs = classes.map(cls =>
+      subscribeToContentIndex(board, cls, (stats, rawIndex) => {
+        const key = `${board}_${cls}`;
+        setClassContentStats(prev => ({ ...prev, [key]: stats }));
+        setClassContentIndex(prev => ({ ...prev, [key]: rawIndex }));
+      })
+    );
+    return () => unsubs.forEach(u => u());
+  }, [user?.board]);
+
+  // Auto-scroll the top bar button strip when admin enables it
+  useEffect(() => {
+    if (!settings?.topBarAutoScroll) return;
+    const el = topBarScrollRef.current;
+    if (!el) return;
+    const stepMs = Math.max(1, settings?.topBarAutoScrollInterval ?? 3) * 1000;
+    let dir = 1;
+    const timer = setInterval(() => {
+      const maxScroll = el.scrollWidth - el.clientWidth;
+      if (maxScroll <= 0) return;
+      if (dir > 0 && el.scrollLeft >= maxScroll - 2) dir = -1;
+      else if (dir < 0 && el.scrollLeft <= 2) dir = 1;
+      el.scrollBy({ left: dir * (el.clientWidth * 0.6), behavior: 'smooth' });
+    }, stepMs);
+    return () => clearInterval(timer);
+  }, [settings?.topBarAutoScroll, settings?.topBarAutoScrollInterval]);
+
   // Reset scroll % whenever the user moves to a different Lucent page or
   // closes the viewer entirely.
   useEffect(() => { setLucentScrollProgress(0); }, [lucentPageIndex, lucentNoteViewer?.id]);
   // Local Auto-Read & Sync state for the Lucent viewer (mirrors LessonView pattern).
   // Initialised from settings.isAutoTtsEnabled but stays local to this view.
   const [lucentAutoSync, setLucentAutoSync] = useState<boolean>(!!settings?.isAutoTtsEnabled);
+  // Smart Search in Lucent Notes
+  const [lucentSearchActive, setLucentSearchActive] = useState(false);
+  const [lucentSearchQuery, setLucentSearchQuery] = useState('');
+  // Volume/Arrow key navigation for Lucent viewer
+  useEffect(() => {
+    if (!lucentNoteViewer) return;
+    const handleVolumeKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+      const totalPgs = lucentNoteViewer.pages.length;
+      const safeIdx = Math.min(Math.max(0, lucentPageIndex), Math.max(0, totalPgs - 1));
+      if (e.keyCode === 175 || e.key === 'ArrowRight') {
+        e.preventDefault();
+        if (safeIdx < totalPgs - 1) setLucentPageIndex(safeIdx + 1);
+      } else if (e.keyCode === 174 || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        if (safeIdx > 0) setLucentPageIndex(safeIdx - 1);
+      }
+    };
+    document.addEventListener('keydown', handleVolumeKey);
+    return () => document.removeEventListener('keydown', handleVolumeKey);
+  }, [lucentNoteViewer, lucentPageIndex]);
   const [hwAnswers, setHwAnswers] = useState<Record<string, number>>({});
 
   // ---- COMPETITION CUSTOM MCQ HUB (admin + student created practice MCQs) ----
@@ -1131,6 +1652,23 @@ export const StudentDashboard: React.FC<Props> = ({
   // Notes/MCQ split view: 'choose' shows a chooser overlay, 'notes' shows notes (with optional MCQ switch button),
   // 'mcq' shows MCQ-only view. Defaults to 'notes' when only notes exist, 'mcq' when only MCQ.
   const [hwViewMode, setHwViewMode] = useState<'notes' | 'mcq' | 'choose'>('notes');
+  const [hwImmersive, setHwImmersive] = useState(false);
+  const [hwNotesViewMode, setHwNotesViewMode] = useState<'html' | 'chunk'>('chunk');
+  // Reset focus mode when homework is closed
+  useEffect(() => {
+    if (!hwActiveHwId) setHwImmersive(false);
+  }, [hwActiveHwId]);
+  const [hwHtmlTtsPlaying, setHwHtmlTtsPlaying] = useState(false);
+  const [noteZoom, setNoteZoom] = useState<number>(1.0);
+  const zoomIn  = () => setNoteZoom(z => Math.min(1.8, parseFloat((z + 0.1).toFixed(1))));
+  const zoomOut = () => setNoteZoom(z => Math.max(0.6, parseFloat((z - 0.1).toFixed(1))));
+  const handleRotate = async () => {
+    rotateFullscreenRef.current = true;
+    const result = await rotateScreen();
+    rotateFullscreenRef.current = false;
+    if (result === null) showAlert('Is device mein screen auto-rotate support nahi hai. Phone ko manually ghuma sakte hain.', 'WARNING');
+  };
+  const [lucentHtmlTtsPlaying, setLucentHtmlTtsPlaying] = useState(false);
   const [hwActivePdf, setHwActivePdf] = useState<string | null>(null);
   const [hwAudioVisible, setHwAudioVisible] = useState(false);
   const [hwVideoVisible, setHwVideoVisible] = useState(false);
@@ -1138,6 +1676,9 @@ export const StudentDashboard: React.FC<Props> = ({
   // --- NOTIFICATION STATE ---
   const [seenNotifIds, setSeenNotifIds] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('nst_seen_notifs_v1') || '[]'); } catch { return []; }
+  });
+  const [hiddenNotifs, setHiddenNotifs] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('nst_hidden_notifs') || '[]'); } catch { return []; }
   });
   const [claimedNotifIds, setClaimedNotifIds] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('nst_claimed_notifs_v1') || '[]'); } catch { return []; }
@@ -1177,7 +1718,9 @@ export const StudentDashboard: React.FC<Props> = ({
   // arranged in order. Reset whenever view/tab changes.
   const [drillBookKey, setDrillBookKey] = useState<string | null>(null);
   const [drillPageKey, setDrillPageKey] = useState<string | null>(null);
-  useEffect(() => { setDrillBookKey(null); setDrillPageKey(null); }, [importantNotesView]);
+  // Book filter chip selected in List View (null = All books)
+  const [listViewBookFilter, setListViewBookFilter] = useState<string | null>(null);
+  useEffect(() => { setDrillBookKey(null); setDrillPageKey(null); setListViewBookFilter(null); }, [importantNotesView]);
   // Confirmation popup before opening full notes from an Important-Note tap.
   const [openNotePrompt, setOpenNotePrompt] = useState<{
     topicText: string;
@@ -1243,8 +1786,10 @@ export const StudentDashboard: React.FC<Props> = ({
   const [hwMcqMode, setHwMcqMode] = useState<Record<string, 'interactive' | 'reveal'>>({});
   // Per-question selected option for Lucent interactive-mode MCQs (key = `${pageKey}_${qi}`)
   const [lucentMcqAnswers, setLucentMcqAnswers] = useState<Record<string, number>>({});
-  // Reset MCQ tab when page or note changes
-  useEffect(() => { setLucentActiveTab('NOTES'); }, [lucentPageIndex, lucentNoteViewer?.id]);
+  // 'html' = styled HTML view (default), 'chunk' = ChunkedNotesReader tappable lines
+  const [lucentNotesViewMode, setLucentNotesViewMode] = useState<'html' | 'chunk'>('chunk');
+  // Reset both tabs + view mode when page or note changes
+  useEffect(() => { setLucentActiveTab('NOTES'); setLucentNotesViewMode('chunk'); }, [lucentPageIndex, lucentNoteViewer?.id]);
   const [hwScrollProgress, setHwScrollProgress] = useState(0);
   const hwScrollContainerRef = useRef<HTMLDivElement>(null);
   const hwScrollSaveTimerRef = useRef<number | null>(null);
@@ -1254,8 +1799,23 @@ export const StudentDashboard: React.FC<Props> = ({
   const [recentHw, setRecentHw] = useState<RecentHwEntry[]>([]);
   const [recentLucent, setRecentLucent] = useState<RecentLucentEntry[]>([]);
   const [homeResumeFilter, setHomeResumeFilter] = useState<'all' | 'chapter' | 'sarSangrah' | 'speedy' | 'mcq' | 'lucent'>('all');
+  const [showAllContinueReading, setShowAllContinueReading] = useState(false);
   const [showHomeSearch, setShowHomeSearch] = useState(false);
   const [homeSearchQuery, setHomeSearchQuery] = useState('');
+  const [homeSearchMode, setHomeSearchMode] = useState<'search' | 'compare'>('search');
+  const [showTopicDirectory, setShowTopicDirectory] = useState(false);
+  const [compareQuery, setCompareQuery] = useState('');
+  // Snapshot of hits frozen at the moment the user clicks "Compare" — avoids
+  // the race where clearing homeSearchQuery empties chapterNoteHits BEFORE
+  // CompareView mounts (which needs hits.length > 1 to render).
+  const [compareHits, setCompareHits] = useState<NoteSearchResult[]>([]);
+  // Max books per Compare session based on subscription tier.
+  // 0 means unlimited. Admin can override via settings.compareLimitXxx.
+  const compareMaxBooks: number = (() => {
+    if (!user.isPremium) return settings?.compareLimitFree ?? 2;
+    if (user.subscriptionLevel === 'ULTRA') return settings?.compareLimitUltra ?? 0;
+    return settings?.compareLimitBasic ?? 5;
+  })();
   // Chapter-notes search results — yeh Class 6-12 (aur Competition) ke
   // locally-cached chapter notes (Concept / Retention / Teaching Strategy /
   // deep dives) mein word-match karta hai. Pehle search bar sirf chapter
@@ -1263,6 +1823,13 @@ export const StudentDashboard: React.FC<Props> = ({
   // padhe hue chapter ke notes ke andar bhi ho, woh bhi result mein aata hai.
   const [chapterNoteHits, setChapterNoteHits] = useState<NoteSearchResult[]>([]);
   const [chapterNoteHitsLoading, setChapterNoteHitsLoading] = useState(false);
+  // Class 6-12 chapter title hits for "Title se Compare"
+  const [chapterTitleHits, setChapterTitleHits] = useState<NoteSearchResult[]>([]);
+  const [showCompareView, setShowCompareView] = useState(false);
+  const [showMcqSearchView, setShowMcqSearchView] = useState(false);
+  const [mcqSearchInitialQuery, setMcqSearchInitialQuery] = useState('');
+  const [chapterMcqHits, setChapterMcqHits] = useState<import('../utils/mcqSearcher').McqSearchHit[]>([]);
+  const [chapterMcqHitsLoading, setChapterMcqHitsLoading] = useState(false);
   // Debounced effect — 250ms wait so we don't thrash the indexedDB scan
   // while the user is still typing.
   useEffect(() => {
@@ -1270,26 +1837,219 @@ export const StudentDashboard: React.FC<Props> = ({
     if (!q || q.length < 2) {
       setChapterNoteHits([]);
       setChapterNoteHitsLoading(false);
+      setChapterMcqHits([]);
+      setChapterMcqHitsLoading(false);
       return;
     }
     let cancelled = false;
     setChapterNoteHitsLoading(true);
+    setChapterMcqHitsLoading(true);
+    setChapterTitleHits([]);
     const t = setTimeout(async () => {
       try {
-        // Split query into words >=3 chars for the matcher; if user typed a
-        // single short word we still pass it through so an exact short match
-        // can hit (e.g. "DNA").
         const words = q.split(/\s+/).filter(w => w.length >= 2);
-        const results = await searchNotesByWords(words.length ? words : [q], 12);
-        if (!cancelled) setChapterNoteHits(results);
+        const effectiveWords = words.length ? words : [q];
+        const [noteResults, mcqResults, titleResults] = await Promise.all([
+          searchNotesByWords(effectiveWords, 50),
+          import('../utils/mcqSearcher').then(m => m.searchMcqsByWords(effectiveWords, 20)),
+          searchNotesByTitle(effectiveWords, 30),
+        ]);
+        if (!cancelled) {
+          setChapterNoteHits(noteResults);
+          setChapterMcqHits(mcqResults);
+          setChapterTitleHits(titleResults);
+        }
       } catch {
-        if (!cancelled) setChapterNoteHits([]);
+        if (!cancelled) {
+          setChapterNoteHits([]);
+          setChapterMcqHits([]);
+          setChapterTitleHits([]);
+        }
       } finally {
-        if (!cancelled) setChapterNoteHitsLoading(false);
+        if (!cancelled) {
+          setChapterNoteHitsLoading(false);
+          setChapterMcqHitsLoading(false);
+        }
       }
     }, 250);
     return () => { cancelled = true; clearTimeout(t); };
   }, [homeSearchQuery]);
+  // Synchronous search over page-wise competition books (Sar Sangrah, Speedy
+  // Science, Speedy Social Science, and any custom books) stored in
+  // settings.homework. Returns NoteSearchResult[] so they can merge directly
+  // into chapterNoteHits for the Compare view.
+  const HW_BOOK_META: Record<string, { label: string; emoji: string; color: string; border: string; chip: string; chipText: string }> = {
+    sarSangrah:          { label: 'Sar Sangrah',          emoji: '📕', color: 'bg-rose-100',   border: 'border-rose-200',   chip: 'bg-rose-100',   chipText: 'text-rose-700' },
+    speedyScience:       { label: 'Speedy Science',       emoji: '🔬', color: 'bg-blue-100',   border: 'border-blue-200',   chip: 'bg-blue-100',   chipText: 'text-blue-700' },
+    speedySocialScience: { label: 'Speedy Social Science', emoji: '🌏', color: 'bg-orange-100', border: 'border-orange-200', chip: 'bg-orange-100', chipText: 'text-orange-700' },
+  };
+  const hwBookHits = React.useMemo<import('../utils/noteSearcher').NoteSearchResult[]>(() => {
+    const q = homeSearchQuery.trim().toLowerCase();
+    if (!q || q.length < 2) return [];
+    const stripHtml = (s: string) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const words = q.split(/\s+/).filter(w => w.length >= 2);
+    const effectiveWords = words.length ? words : [q];
+    const allHw = (settings?.homework || []) as import('../types').HomeworkItem[];
+    const customBooks = (settings?.customBooks || []) as Array<{ id: string; name: string }>;
+    const customBookIds = customBooks.map(b => b.id);
+    const allBookIds = Object.keys(HW_BOOK_META).concat(customBookIds);
+    const results: import('../utils/noteSearcher').NoteSearchResult[] = [];
+    allBookIds.forEach(bookId => {
+      // Prefer the display name from settings.customBooks for custom books
+      const customName = customBooks.find(b => b.id === bookId)?.name;
+      const meta = HW_BOOK_META[bookId] || { label: customName || bookId, emoji: '📖', color: 'bg-slate-100', border: 'border-slate-200', chip: 'bg-slate-100', chipText: 'text-slate-700' };
+      const displayLabel = HW_BOOK_META[bookId] ? meta.label : (customName || bookId);
+      const bookItems = allHw.filter((hw: any) => hw.targetSubject === bookId && (hw.notes?.trim() || hw.chunkNotes?.trim() || hw.htmlNotes?.trim()));
+      bookItems.forEach((hw: any) => {
+        const plainText = stripHtml(hw.notes || hw.chunkNotes || hw.htmlNotes || '');
+        const text = plainText.toLowerCase();
+        const titleText = (hw.title || '').toLowerCase();
+        const matchedWords = effectiveWords.filter(w => text.includes(w) || titleText.includes(w));
+        if (matchedWords.length === 0) return;
+        const idx = text.indexOf(effectiveWords[0]);
+        const start = Math.max(0, idx - 30);
+        const snippet = idx >= 0 ? plainText.substring(start, start + 150) : plainText.substring(0, 150);
+        results.push({
+          storageKey: `hw_${hw.id}`,
+          chapterId: hw.id,
+          subjectName: displayLabel,
+          board: 'COMPETITION',
+          classLevel: 'COMPETITION',
+          noteTitle: hw.title || `Page ${hw.pageNo || '?'}`,
+          noteContent: snippet,
+          noteFullContent: plainText,
+          matchCount: matchedWords.length,
+          matchedWords,
+          chapterTitleFromKey: hw.title || `Page ${hw.pageNo || '?'}`,
+          bookName: displayLabel,
+          pageNo: hw.pageNo,
+          topicName: hw.topicName,
+        });
+      });
+    });
+    return results.sort((a, b) => b.matchCount - a.matchCount).slice(0, 30);
+  }, [homeSearchQuery, settings?.homework, settings?.customBooks]);
+
+  // Lucent page-wise notes → NoteSearchResult[] for Compare mode.
+  // Deduplicates by lessonTitle + pageNo so the same lesson stored under
+  // multiple subjects never appears twice.
+  const lucentCompareHits = React.useMemo<import('../utils/noteSearcher').NoteSearchResult[]>(() => {
+    const q = homeSearchQuery.trim().toLowerCase();
+    if (!q || q.length < 2) return [];
+    const stripHtml = (s: string) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const words = q.split(/\s+/).filter(w => w.length >= 2);
+    const effectiveWords = words.length ? words : [q];
+    const seen = new Set<string>();
+    const results: import('../utils/noteSearcher').NoteSearchResult[] = [];
+    ((settings?.lucentNotes || []) as LucentNoteEntry[]).forEach(entry => {
+      (entry.pages || []).forEach((pg, pi) => {
+        const dedupeKey = `${(entry.lessonTitle || '').toLowerCase()}_${pg.pageNo}`;
+        if (seen.has(dedupeKey)) return;
+        const text = stripHtml(pg.content || '').toLowerCase();
+        const titleHit = entry.lessonTitle?.toLowerCase().includes(q);
+        if (!text.includes(q) && !titleHit) return;
+        const matchedWords = effectiveWords.filter(w => text.includes(w) || entry.lessonTitle?.toLowerCase().includes(w));
+        if (matchedWords.length === 0) return;
+        seen.add(dedupeKey);
+        const idx = text.indexOf(effectiveWords[0]);
+        const start = Math.max(0, idx - 30);
+        const snippet = idx >= 0 ? stripHtml(pg.content).substring(start, start + 150) : stripHtml(pg.content).substring(0, 150);
+        results.push({
+          storageKey: `lucent_${entry.id}_${pi}`,
+          chapterId: entry.id,
+          subjectName: entry.subject || 'lucent',
+          board: 'COMPETITION',
+          classLevel: 'COMPETITION',
+          noteTitle: entry.lessonTitle,
+          noteContent: snippet,
+          noteFullContent: stripHtml(pg.content || ''),
+          matchCount: matchedWords.length,
+          matchedWords,
+          chapterTitleFromKey: entry.lessonTitle,
+          bookName: entry.bookName?.trim() || 'Lucent GK',
+          pageNo: pg.pageNo,
+          topicName: pg.topicName,
+        });
+      });
+    });
+    return results.sort((a, b) => b.matchCount - a.matchCount);
+  }, [homeSearchQuery, settings?.lucentNotes]);
+
+  // Title-based compare — finds notes from all books where the NOTE TITLE
+  // matches the search query (not content). Lets students compare same-topic
+  // notes across books even if the content words differ.
+  const titleBasedHits = React.useMemo<import('../utils/noteSearcher').NoteSearchResult[]>(() => {
+    const q = homeSearchQuery.trim().toLowerCase();
+    if (!q || q.length < 2) return [];
+    const stripHtml = (s: string) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const words = q.split(/\s+/).filter(w => w.length >= 2);
+    const effectiveWords = words.length ? words : [q];
+    const results: import('../utils/noteSearcher').NoteSearchResult[] = [];
+
+    // Homework book items — match by title
+    const allHw = (settings?.homework || []) as import('../types').HomeworkItem[];
+    const customBooks = (settings?.customBooks || []) as Array<{ id: string; name: string }>;
+    const customBookIds = customBooks.map(b => b.id);
+    const allBookIds = Object.keys(HW_BOOK_META).concat(customBookIds);
+
+    allBookIds.forEach(bookId => {
+      const meta = (HW_BOOK_META as Record<string, { label: string; emoji: string }>)[bookId];
+      const customBook = customBooks.find(b => b.id === bookId);
+      const displayLabel = meta ? `${meta.emoji} ${meta.label}` : (customBook?.name || bookId);
+
+      const bookItems = allHw.filter((hw: any) => hw.targetSubject === bookId && (hw.notes?.trim() || hw.chunkNotes?.trim() || hw.htmlNotes?.trim()));
+      bookItems.forEach((hw: any) => {
+        const titleText = (hw.title || '').toLowerCase();
+        const matchedWords = effectiveWords.filter(w => titleText.includes(w));
+        if (matchedWords.length === 0) return;
+        const plainText = stripHtml(hw.notes || hw.chunkNotes || hw.htmlNotes || '');
+        results.push({
+          storageKey: `hw_${hw.id}`,
+          chapterId: hw.id,
+          subjectName: displayLabel,
+          board: 'COMPETITION',
+          classLevel: 'COMPETITION',
+          noteTitle: hw.title || `Page ${hw.pageNo || '?'}`,
+          noteContent: plainText.substring(0, 150),
+          noteFullContent: plainText,
+          matchCount: matchedWords.length,
+          matchedWords,
+          chapterTitleFromKey: hw.title || `Page ${hw.pageNo || '?'}`,
+          bookName: displayLabel,
+          pageNo: hw.pageNo,
+        });
+      });
+    });
+
+    // Lucent notes — match by lessonTitle
+    ((settings?.lucentNotes || []) as LucentNoteEntry[]).forEach(entry => {
+      const titleText = (entry.lessonTitle || '').toLowerCase();
+      const matchedWords = effectiveWords.filter(w => titleText.includes(w));
+      if (matchedWords.length === 0) return;
+      (entry.pages || []).forEach((pg: any, pi: number) => {
+        const fullText = stripHtml(pg.content || '');
+        results.push({
+          storageKey: `lucent_${entry.id}_${pi}`,
+          chapterId: entry.id,
+          subjectName: entry.subject || 'lucent',
+          board: 'COMPETITION',
+          classLevel: 'COMPETITION',
+          noteTitle: entry.lessonTitle,
+          noteContent: fullText.substring(0, 150),
+          noteFullContent: fullText,
+          matchCount: matchedWords.length,
+          matchedWords,
+          chapterTitleFromKey: entry.lessonTitle,
+          bookName: entry.bookName?.trim() || 'Lucent GK',
+          pageNo: pg.pageNo,
+          topicName: pg.topicName,
+        });
+      });
+    });
+
+    return results.sort((a, b) => b.matchCount - a.matchCount);
+  }, [homeSearchQuery, settings?.homework, settings?.lucentNotes, settings?.customBooks]);
+
   // When the user clicks a search result, we stash the query here so the
   // ChunkedNotesReader on the next screen (Lucent / Homework notes) can find
   // the matching topic and auto-read from that exact line. Cleared shortly
@@ -1335,7 +2095,9 @@ export const StudentDashboard: React.FC<Props> = ({
   const [globalNoteStars, setGlobalNoteStars] = useState<Record<string, NoteStarEntry>>({});
   const [showCommunityStarsPage, setShowCommunityStarsPage] = useState(false);
   const [starredPageTab, setStarredPageTab] = useState<'mine' | 'global'>('mine');
+  useEffect(() => { setListViewBookFilter(null); }, [starredPageTab]);
   const [globalNotesRange, setGlobalNotesRange] = useState<'all' | 'monthly' | 'weekly'>('all');
+  const [showAllTrending, setShowAllTrending] = useState(false);
   useEffect(() => {
     const unsub = subscribeToTopNoteStars(200, setGlobalNoteStars);
     return () => { try { unsub(); } catch {} };
@@ -1410,6 +2172,11 @@ export const StudentDashboard: React.FC<Props> = ({
   }, [globalNoteStars, applyStarBoost]);
   const [readingStreak, setReadingStreak] = useState<StreakInfo>({ current: 0, longest: 0, readToday: false });
   const [showStreakPopup, setShowStreakPopup] = useState(false);
+  const [streakHistoryView, setStreakHistoryView] = useState(false);
+  const [showLifetimePopup, setShowLifetimePopup] = useState(false);
+  const [lifetimeQuoteIdx, setLifetimeQuoteIdx] = useState(0);
+  const [showPremiumPopup, setShowPremiumPopup] = useState(false);
+  const [premiumQuoteIdx, setPremiumQuoteIdx] = useState(0);
   // When the user taps a "Today" subject banner card with multiple items, this picker shows the list.
   const [hwTodayPickerSub, setHwTodayPickerSub] = useState<string | null>(null);
   // True when the active homework was opened directly from the Homework page (today banner / today picker).
@@ -1420,6 +2187,9 @@ export const StudentDashboard: React.FC<Props> = ({
   // 'HOME' returns to the Home tab — used when the note was opened from a Continue Reading
   // card on Home, so empty/quick exits don't dump the user on the Homework tab.
   const [hwOpenedFrom, setHwOpenedFrom] = useState<'HOMEWORK' | 'HOME'>('HOMEWORK');
+  // Where the homework SUBJECT VIEW was opened from — 'HOMEWORK' tab or 'COURSES' tab.
+  // Used by goBack to decide whether to show the Homework page or go back to SubjectSelection.
+  const [hwSubjectOpenedFrom, setHwSubjectOpenedFrom] = useState<'HOMEWORK' | 'COURSES'>('HOMEWORK');
   // Same idea for chapter content (PDF / Video / Audio / MCQ players): if the chapter
   // was opened from a Continue Reading card on Home, Back from the player should return
   // straight to Home — not to the chapter list inside Courses.
@@ -1555,6 +2325,37 @@ export const StudentDashboard: React.FC<Props> = ({
     }
   };
 
+  const openChapterFromMcqHit = async (hit: import('../utils/mcqSearcher').McqSearchHit) => {
+    try {
+      const board = (hit.board === 'BSEB' ? 'BSEB' : 'CBSE') as 'CBSE' | 'BSEB';
+      const cls = hit.classLevel;
+      const stream = (user.stream || 'Science') as any;
+      const subs = getSubjectsList(cls, stream, board);
+      const wanted = (hit.subjectName || '').toLowerCase().replace(/[-\s]+/g, ' ').trim();
+      let subj = subs.find(s => s.name.toLowerCase() === hit.subjectName?.toLowerCase());
+      if (!subj) subj = subs.find(s => s.name.toLowerCase().replace(/[-\s]+/g, ' ').trim() === wanted);
+      if (!subj) { showAlert('Iss chapter ka subject is class mein available nahi hai.', 'ERROR'); return; }
+      const lang = (user.preferredLanguage || 'English') as any;
+      const chapters = await fetchChapters(board, cls as any, stream, subj, lang);
+      const chapter = chapters.find(c => c.id === hit.chapterId);
+      if (!chapter) { showAlert('Chapter milana mushkil hai.', 'ERROR'); return; }
+      setPendingReadQuery(homeSearchQuery.trim());
+      openRecentChapter({
+        id: `mcqsearch_${chapter.id}`,
+        chapter,
+        subject: subj as any,
+        classLevel: cls,
+        board,
+        contentType: 'PDF',
+        scrollY: 0,
+        timestamp: Date.now(),
+      } as any);
+    } catch (err) {
+      console.error('[search] openChapterFromMcqHit failed', err);
+      showAlert('Chapter kholne mein dikkat aayi.', 'ERROR');
+    }
+  };
+
   // Open a previously-read Lucent page (from History → Continue Reading).
   // Looks up the original LucentNoteEntry from settings and restores the page index.
   const openRecentLucent = (entry: RecentLucentEntry) => {
@@ -1602,6 +2403,10 @@ export const StudentDashboard: React.FC<Props> = ({
       setLucentNoteViewer(null);
       closedSomething = true;
     }
+    if (lucentPageListViewer) {
+      setLucentPageListViewer(null);
+      closedSomething = true;
+    }
     // Homework MCQ player
     if (homeworkPlayerHwId) {
       try { closeHomeworkPlayer(); } catch {}
@@ -1633,11 +2438,12 @@ export const StudentDashboard: React.FC<Props> = ({
       speedyScience: 'Speedy Science',
     };
     const hw = entry.hw;
-    const hasNotes = !!(hw && hw.notes && hw.notes.trim());
+    const hasNotes = !!(hw && (hw.notes?.trim() || (hw as any).chunkNotes?.trim() || (hw as any).htmlNotes?.trim()));
     const hasMcq = !!(hw && hw.parsedMcqs && hw.parsedMcqs.length > 0);
     if (hasNotes && hasMcq) setHwViewMode('notes'); // Resume into notes
     else if (hasMcq) setHwViewMode('mcq');
     else setHwViewMode('notes');
+    setHwNotesViewMode('chunk');
 
     // Restore the last-read topic index so ChunkedNotesReader scrolls to & resumes from there
     if (entry.id && typeof entry.topicIndex === 'number') {
@@ -1753,7 +2559,10 @@ export const StudentDashboard: React.FC<Props> = ({
   }, [settings?.notifications]);
 
   // Notifications: total count + unread count
-  const allNotifications: AppNotification[] = settings?.notifications || [];
+  const _nowMs = Date.now();
+  const allNotifications: AppNotification[] = (settings?.notifications || []).filter(
+    n => (!n.expiresAt || new Date(n.expiresAt).getTime() > _nowMs) && !hiddenNotifs.includes(n.id)
+  );
   const unreadNotifCount = allNotifications.filter(n => !seenNotifIds.includes(n.id)).length;
 
   // Star a note topic — ONE-WAY ONLY. Once saved, the user cannot un-save it
@@ -2296,6 +3105,48 @@ export const StudentDashboard: React.FC<Props> = ({
     }
   }, [user.id]);
 
+  // === STORE VISIT → DISCOUNT COUPON CODE INBOX ===
+  // Jab user Store visit kare aur discount event active ho aur user subscribed nahi ho
+  // toh discount coupon code mailbox mein bhejo
+  useEffect(() => {
+    if (activeTab !== 'STORE') return;
+    const event = settings?.specialDiscountEvent;
+    if (!event?.enabled || !event?.couponCode) return;
+
+    // Check if discount event is currently active (startsAt <= now < endsAt)
+    const now = Date.now();
+    const start = event.startsAt ? new Date(event.startsAt).getTime() : 0;
+    const end = event.endsAt ? new Date(event.endsAt).getTime() : Infinity;
+    const isActive = start === 0 || (now >= start && now < end);
+    if (!isActive) return;
+
+    // Sirf unsubscribed users ko bhejo
+    const isSubscribed = user.isPremium && user.subscriptionEndDate && new Date(user.subscriptionEndDate) > new Date();
+    if (isSubscribed) return;
+
+    // Ek baar bhejo per event per user
+    const sentKey = `discount_code_sent_${user.id}_${event.eventName}_${event.couponCode}`;
+    if (localStorage.getItem(sentKey)) return;
+
+    // Inbox message banao with code and instructions
+    const expiryHours = settings?.rewardExpiryHours ?? 168;
+    const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000).toISOString();
+    const newMsg = {
+      id: `disc-code-${Date.now()}`,
+      text: `🎉 ${event.eventName} Special Offer!\n\nAapke liye ${event.discountPercent}% discount ka coupon code taiyar hai!\n\n📋 Code: ${event.couponCode}\n\n✅ Kaise Use Karein:\n1. Neeche "Redeem" tab pe jao\n2. Yeh code enter karo: ${event.couponCode}\n3. Apply karo — discount seedha Store mein dikha dega!\n\n⏰ Jaldi karein, offer limited time ke liye hai!`,
+      date: new Date().toISOString(),
+      read: false,
+      type: 'TEXT' as const,
+      expiresAt,
+      isClaimed: false,
+    };
+
+    const updatedUser = { ...user, inbox: [newMsg, ...(user.inbox || [])] };
+    handleUserUpdate(updatedUser);
+    localStorage.setItem(sentKey, '1');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
   useEffect(() => {
     const today = new Date();
     const yesterday = new Date(today);
@@ -2408,14 +3259,17 @@ export const StudentDashboard: React.FC<Props> = ({
       if (gift.type === "CREDITS") {
         updatedUser.credits = (user.credits || 0) + Number(gift.value);
         successMsg = `🎁 Gift Claimed! Added ${gift.value} Credits.`;
+        triggerRewardEffect(Number(gift.value), 'Gift Reward');
       } else if (gift.type === "SUBSCRIPTION") {
         const [tier, level] = (gift.value as string).split("_");
         const duration = gift.durationHours || 24;
         applySubscription(tier, level, duration);
+        triggerRewardEffect(0, 'Subscription Unlocked! 🎉');
       }
     } else if (reward) {
       const duration = reward.durationHours || 4;
       applySubscription(reward.tier, reward.level, duration);
+      triggerRewardEffect(0, 'Reward Claimed! 🎉');
     }
     handleUserUpdate(updatedUser);
     showAlert(successMsg, "SUCCESS", "Rewards Claimed");
@@ -2424,6 +3278,9 @@ export const StudentDashboard: React.FC<Props> = ({
   const userRef = React.useRef(user);
   useEffect(() => {
     userRef.current = user;
+    // Expose ref globally so early-declared effects (store discount, MCQ tracker)
+    // can read the freshest user without stale-closure issues.
+    (window as any).__dashUserRef = userRef;
   }, [user]);
 
   useEffect(() => {
@@ -2609,7 +3466,18 @@ export const StudentDashboard: React.FC<Props> = ({
   }, [dailyStudySeconds, user.id, user.createdAt, user.subscriptionTier]);
 
   const [showInbox, setShowInbox] = useState(false);
-  const unreadCount = user.inbox?.filter((m) => !m.read).length || 0;
+  const EXPIRY_SOON_MS = 2 * 60 * 60 * 1000; // 2 hours — re-notify when reward is this close to expiry
+  const unreadCount = (user.inbox || []).filter((m) => {
+    if (m.isClaimed) return false;
+    const now = Date.now();
+    const expired = m.expiresAt && new Date(m.expiresAt).getTime() <= now;
+    if (expired) return false;
+    if (!m.read) return true; // normal unread
+    // Expiry-soon re-notification: show dot again when within 2h of expiry and not yet seen as expiring-soon
+    const expiringSoon = m.expiresAt && (new Date(m.expiresAt).getTime() - now) < EXPIRY_SOON_MS;
+    if (expiringSoon && !(m as any).expirySoonRead) return true;
+    return false;
+  }).length;
 
   useEffect(() => {
     setCanClaimReward(
@@ -2740,11 +3608,21 @@ export const StudentDashboard: React.FC<Props> = ({
     const updatedUser = RewardEngine.processClaim(user, finalReward);
     handleUserUpdate(updatedUser);
     setCanClaimReward(false);
+    triggerRewardEffect(finalReward, 'Login Reward');
     showAlert(
       `Received: ${finalReward} Free Credits!`,
       "SUCCESS",
       "Daily Goal Met",
     );
+  };
+
+  const handleSpendCoins = (amount: number): boolean => {
+    if (user.role === 'ADMIN' || user.role === 'SUB_ADMIN') return true;
+    const current = user.credits ?? 0;
+    if (current < amount) return false;
+    const updatedUser = { ...user, credits: current - amount };
+    handleUserUpdate(updatedUser);
+    return true;
   };
 
   const handleUserUpdate = (updatedUser: User) => {
@@ -2770,11 +3648,54 @@ export const StudentDashboard: React.FC<Props> = ({
     }
   };
 
-  const markInboxRead = () => {
-    if (!user.inbox) return;
-    const updatedInbox = user.inbox.map((m) => ({ ...m, read: true }));
-    handleUserUpdate({ ...user, inbox: updatedInbox });
+  // Countdown ticker — updates every 30s when inbox is open
+  useEffect(() => {
+    if (!showInbox) return;
+    const tid = setInterval(() => setNowTick(Date.now()), 30000);
+    return () => clearInterval(tid);
+  }, [showInbox]);
+
+  // Helper: format remaining time as "Xh Ym baki"
+  const fmtCountdown = (expiresAt: string): string => {
+    const ms = new Date(expiresAt).getTime() - Date.now();
+    if (ms <= 0) return 'Expired';
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    if (h > 0) return `${h}h ${m}m baki`;
+    return `${m}m baki`;
   };
+
+  const markInboxRead = () => {
+    const freshUser = (window as any).__dashUserRef?.current ?? user;
+    if (!freshUser.inbox) return;
+    const updatedInbox = freshUser.inbox.map((m: any) => ({ ...m, read: true, expirySoonRead: true }));
+    handleUserUpdate({ ...freshUser, inbox: updatedInbox });
+  };
+
+  // Auto-mark all inbox messages as read (and expirySoonRead) when inbox is opened
+  useEffect(() => {
+    if (!showInbox) return;
+    const freshUser = (window as any).__dashUserRef?.current ?? user;
+    if (!freshUser.inbox || freshUser.inbox.length === 0) return;
+    const hasUnread = freshUser.inbox.some((m: any) => {
+      if (m.isClaimed) return false;
+      const now = Date.now();
+      const expired = m.expiresAt && new Date(m.expiresAt).getTime() <= now;
+      if (expired) return false;
+      if (!m.read) return true;
+      const expiringSoon = m.expiresAt && (new Date(m.expiresAt).getTime() - now) < EXPIRY_SOON_MS;
+      if (expiringSoon && !m.expirySoonRead) return true;
+      return false;
+    });
+    if (!hasUnread) return;
+    const updatedInbox = freshUser.inbox.map((m: any) => {
+      const now = Date.now();
+      const expiringSoon = m.expiresAt && (new Date(m.expiresAt).getTime() - now) < EXPIRY_SOON_MS;
+      return { ...m, read: true, ...(expiringSoon ? { expirySoonRead: true } : {}) };
+    });
+    handleUserUpdate({ ...freshUser, inbox: updatedInbox });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showInbox]);
 
   // Built-in subjects whose homework lives behind the "Subject view" (vs. dated history).
   const HOMEWORK_SUBJECTS_BASE = ['mcq', 'sarSangrah', 'speedySocialScience', 'speedyScience'];
@@ -2788,6 +3709,21 @@ export const StudentDashboard: React.FC<Props> = ({
   // skipping the Year / Month / Week date hierarchy used for MCQ/standard homework.
   const PAGE_WISE_SUBJECTS = new Set<string>(['sarSangrah', 'speedySocialScience', 'speedyScience', ...customBooksFromSettings.map(b => b.id)]);
 
+  const _autoOpenFirstBookNote = (subId: string) => {
+    const pageWise = new Set(['sarSangrah', 'speedySocialScience', 'speedyScience',
+      ...((settings as any)?.customBooks || []).map((b: any) => b.id)]);
+    // For page-wise subjects (Sar Sangrah, Speedy, custom books): show the page
+    // list first — never auto-open Page 1. Same pattern as Lucent books.
+    if (pageWise.has(subId)) {
+      setHwActiveHwId(null);
+      setHwOpenedDirect(false);
+      return;
+    }
+    // For non-page-wise subjects (MCQ etc.) just clear the active ID.
+    setHwActiveHwId(null);
+    setHwOpenedDirect(false);
+  };
+
   const handleContentSubjectSelect = (subject: Subject) => {
     setSelectedSubject(subject);
     setHomeworkSubjectView(null);
@@ -2797,11 +3733,12 @@ export const StudentDashboard: React.FC<Props> = ({
       setHwYear(null);
       setHwMonth(null);
       setHwWeek(null);
-      setHwActiveHwId(null);
+      _autoOpenFirstBookNote(subject.id);
       return;
     }
     if (subject.id === 'lucent') {
       setLucentCategoryView(true);
+      setSelectedLucentBook(null);
       return;
     }
     setContentViewStep("CHAPTERS");
@@ -2810,30 +3747,6 @@ export const StudentDashboard: React.FC<Props> = ({
     const lang =
       (activeSessionBoard || user.board) === "BSEB" ? "Hindi" : "English";
     const currentClass = (activeSessionClass as any) || user.classLevel || "10";
-    // Inject admin-added Lucent books targeted to this class (page-wise notes/MCQ — Competition-style).
-    // Lessons ko page number wise sort karte hain — jis lesson ka pehla page number
-    // sabse chhota hai woh sabse upar (e.g. lesson covering Page 1 pehle, Page 5 wala baad me).
-    const lessonMinPageNo = (n: LucentNoteEntry): number => {
-      let min = Infinity;
-      (n.pages || []).forEach(p => {
-        const num = parseInt(p.pageNo || '', 10);
-        if (!isNaN(num) && num < min) min = num;
-      });
-      return min === Infinity ? 99999 : min;
-    };
-    const adminLucentForClass: Chapter[] = ((settings?.lucentNotes || []) as LucentNoteEntry[])
-      .filter(n => (n.classLevel || 'COMPETITION') === currentClass)
-      .sort((a, b) => lessonMinPageNo(a) - lessonMinPageNo(b))
-      .map(n => {
-        const minPg = lessonMinPageNo(n);
-        return {
-          id: `lucent_admin_${n.id}`,
-          title: `📘 ${n.bookName || n.lessonTitle} — ${n.lessonTitle}`,
-          description: `Admin Notes • ${n.pages.length} page${n.pages.length === 1 ? '' : 's'}`,
-          // Page badge instead of CH — yeh lesson page-wise organize hua hai.
-          pageNo: minPg < 99999 ? String(minPg) : undefined,
-        };
-      });
     fetchChapters(
       activeSessionBoard || user.board || "CBSE",
       currentClass,
@@ -2853,7 +3766,7 @@ export const StudentDashboard: React.FC<Props> = ({
         }
         return a.title.localeCompare(b.title);
       });
-      setChapters([...adminLucentForClass, ...sortedData]);
+      setChapters([...sortedData]);
       setLoadingChapters(false);
     });
   };
@@ -2991,7 +3904,7 @@ export const StudentDashboard: React.FC<Props> = ({
           // opened the note and pressed Back without scrolling far.
           try {
             const cur = filteredHw.find(h => (h.id || '') === hwActiveHwId);
-            if (cur && cur.id && cur.notes && cur.notes.trim()) {
+            if (cur && cur.id && (cur.notes?.trim() || (cur as any).chunkNotes?.trim() || (cur as any).htmlNotes?.trim())) {
               saveRecentHomework({
                 id: cur.id,
                 scrollY: 0,
@@ -3033,7 +3946,13 @@ export const StudentDashboard: React.FC<Props> = ({
         if (hwYear !== null) { setHwYear(null); return; }
         setHomeworkSubjectView(null);
         setSelectedSubject(null);
-        setShowHomeworkHistory(true);
+        setHwSubjectOpenedFrom('HOMEWORK');
+        // Only show the Homework full page if the subject was opened FROM the
+        // Homework tab. If it was opened from the Courses tab, just clear the
+        // subject view — the Courses SubjectSelection will reappear naturally.
+        if (hwSubjectOpenedFrom === 'HOMEWORK') {
+          setShowHomeworkHistory(true);
+        }
       };
 
       // Breadcrumb title
@@ -3066,25 +3985,49 @@ export const StudentDashboard: React.FC<Props> = ({
             <span className={`text-[10px] font-bold ${theme.chip} px-2 py-0.5 rounded-full`}>{subjectLucentLessons.length}</span>
           </div>
           <div className="grid grid-cols-1 gap-2">
-            {subjectLucentLessons.map(entry => (
+            {subjectLucentLessons.slice(0, lucentLessonsPage).map(entry => {
+              const topicNames = [...new Set((entry.pages || []).map(p => (p.topicName || '').trim()).filter(Boolean))];
+              return (
+                <div key={entry.id} className={`bg-white border-2 ${theme.border} rounded-2xl overflow-hidden hover:shadow-md transition-all`}>
+                  {/* Main read area */}
+                  <button
+                    onClick={() => { setLucentPageListViewer(entry); }}
+                    className="w-full p-3 text-left active:scale-[0.98] flex items-center gap-3"
+                  >
+                    <div className={`${theme.bgSoft} ${theme.textDeep} w-12 h-12 rounded-xl flex items-center justify-center shrink-0`}>
+                      <BookOpen size={20} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-black ${theme.textDeep} truncate`}>{entry.lessonTitle}</p>
+                      <p className="text-[11px] text-slate-500 font-bold mt-0.5">
+                        {entry.pages.length} page{entry.pages.length === 1 ? '' : 's'}
+                        {topicNames.length > 0 ? ` • ${topicNames.length} topic${topicNames.length > 1 ? 's' : ''}` : ''}
+                        {entry.pages.some(p => p.mcqs && p.mcqs.length > 0) ? ' • MCQs' : ''}
+                      </p>
+                    </div>
+                    <ChevronRight size={18} className={`${theme.text} shrink-0`} />
+                  </button>
+                  {/* Compare / Topics button — only if lesson has tagged topics */}
+                  {topicNames.length > 0 && (
+                    <button
+                      onClick={() => { setLucentLessonCompare(entry); setLucentLessonCompareTab('topics'); }}
+                      className={`w-full border-t ${theme.border} px-3 py-2 flex items-center gap-2 ${theme.bgSoft} active:scale-[0.99] transition-all`}
+                    >
+                      <GitCompare size={13} className={theme.text} />
+                      <span className={`text-[11px] font-black ${theme.text}`}>📌 {topicNames.length} Topic{topicNames.length > 1 ? 's' : ''} — Compare karein</span>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {subjectLucentLessons.length > lucentLessonsPage && (
               <button
-                key={entry.id}
-                onClick={() => { setLucentNoteViewer(entry); setLucentPageIndex(0); }}
-                className={`bg-white border-2 ${theme.border} rounded-2xl p-3 text-left hover:shadow-md transition-all active:scale-[0.98] flex items-center gap-3`}
+                onClick={() => setLucentLessonsPage(p => p + 6)}
+                className={`w-full py-3 rounded-2xl border-2 border-dashed ${theme.border} ${theme.text} font-bold text-xs flex items-center justify-center gap-2 hover:opacity-80 active:scale-[0.98] transition-all`}
               >
-                <div className={`${theme.bgSoft} ${theme.textDeep} w-12 h-12 rounded-xl flex items-center justify-center shrink-0`}>
-                  <BookOpen size={20} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className={`text-sm font-black ${theme.textDeep} truncate`}>{entry.lessonTitle}</p>
-                  <p className="text-[11px] text-slate-500 font-bold mt-0.5">
-                    {entry.pages.length} page{entry.pages.length === 1 ? '' : 's'}
-                    {entry.pages.some(p => p.mcqs && p.mcqs.length > 0) ? ' • MCQs included' : ''}
-                  </p>
-                </div>
-                <ChevronRight size={18} className={`${theme.text} shrink-0`} />
+                <ChevronDown size={14} /> Load More ({subjectLucentLessons.length - lucentLessonsPage} aur lessons)
               </button>
-            ))}
+            )}
           </div>
         </div>
       ) : null;
@@ -3122,11 +4065,40 @@ export const StudentDashboard: React.FC<Props> = ({
           return null;
         }
         const flatIdx = filteredHw.findIndex(h => (h.id || '') === hwActiveHwId);
-        const nextHw = flatIdx >= 0 && flatIdx + 1 < filteredHw.length ? filteredHw[flatIdx + 1] : null;
         const prevHw = flatIdx > 0 ? filteredHw[flatIdx - 1] : null;
         const hwKey = activeHw.id || String(flatIdx);
 
-        const hasNotes = !!(activeHw.notes && activeHw.notes.trim());
+        // ── Topic Continuation: merge consecutive pages with same topicName ──
+        // If multiple saved pages share the same topicName, stitch their notes
+        // into one seamless reading so the student never sees a mid-topic cutoff.
+        const currentTopicName = ((activeHw as any).topicName || '').trim();
+        const continuationPages: typeof filteredHw = [];
+        if (currentTopicName && isPageWiseSubject) {
+          let ci = flatIdx + 1;
+          while (ci < filteredHw.length) {
+            const cand = filteredHw[ci];
+            if (((cand as any).topicName || '').trim() === currentTopicName) {
+              continuationPages.push(cand);
+              ci++;
+            } else {
+              break;
+            }
+          }
+        }
+        // Combined notes: current page + all continuation pages
+        const combinedNotes = [activeHw.notes, ...continuationPages.map(p => p.notes)]
+          .filter(Boolean)
+          .join('\n\n');
+        // Next topic = first page AFTER all continuation pages (skips mid-topic pages)
+        const lastContIdx = flatIdx + continuationPages.length;
+        const effectiveNextHw = lastContIdx + 1 < filteredHw.length
+          ? filteredHw[lastContIdx + 1]
+          : null;
+        // Compatibility alias — only used in MCQ mode where continuation doesn't apply
+        const nextHw = flatIdx >= 0 && flatIdx + 1 < filteredHw.length ? filteredHw[flatIdx + 1] : null;
+        // ─────────────────────────────────────────────────────────────────────
+
+        const hasNotes = !!(combinedNotes && combinedNotes.trim()) || !!((activeHw as any).chunkNotes?.trim()) || !!((activeHw as any).htmlNotes?.trim());
         const hasMcq = !!(activeHw.parsedMcqs && activeHw.parsedMcqs.length > 0);
         const hasMedia = !!(activeHw.audioUrl || activeHw.videoUrl);
         // Effective view mode — guard against stale state if content lacks the requested mode.
@@ -3146,7 +4118,7 @@ export const StudentDashboard: React.FC<Props> = ({
           setHwScrollProgress(0);
           hwScrollRestoredRef.current = false;
           // Reset view mode for the new item.
-          const tNotes = !!(target.notes && target.notes.trim());
+          const tNotes = !!(target.notes?.trim() || (target as any).chunkNotes?.trim() || (target as any).htmlNotes?.trim());
           const tMcq = !!(target.parsedMcqs && target.parsedMcqs.length > 0);
           if (tNotes && tMcq) setHwViewMode('choose');
           else if (tMcq) setHwViewMode('mcq');
@@ -3179,7 +4151,7 @@ export const StudentDashboard: React.FC<Props> = ({
               </button>
             )}
             {/* Sticky header */}
-            <div className={`${theme.btn} text-white px-4 py-3 flex items-center gap-2 shrink-0`}>
+            <div className={`${theme.btn} text-white px-4 py-3 flex items-center gap-2 shrink-0 ${hwImmersive ? 'hidden' : ''}`}>
               <button onClick={goBack} className="bg-white/20 hover:bg-white/30 p-2 rounded-full shrink-0 transition-colors">
                 <ChevronRight size={18} className="rotate-180" />
               </button>
@@ -3194,17 +4166,50 @@ export const StudentDashboard: React.FC<Props> = ({
                 </p>
                 <p className="font-black text-sm leading-tight truncate">{activeHw.title}</p>
               </div>
-              {/* Save offline (HTML) — works for notes + MCQs in any mode incl. Competition */}
+              {/* Read / Write toggle — right next to note title */}
+              {effectiveMode === 'notes' && (
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    onClick={() => { stopSpeech(); setHwNotesViewMode('chunk'); }}
+                    className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${hwNotesViewMode === 'chunk' ? 'bg-amber-400 text-white border-amber-400 shadow-sm' : 'bg-white/20 text-white border-white/30 hover:bg-white/30'}`}
+                    title="Read Mode"
+                  >
+                    <Volume2 size={11} /> Read
+                  </button>
+                  <button
+                    onClick={() => { stopSpeech(); setHwNotesViewMode('html'); }}
+                    className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${hwNotesViewMode === 'html' ? 'bg-teal-400 text-white border-teal-400 shadow-sm' : 'bg-white/20 text-white border-white/30 hover:bg-white/30'}`}
+                    title="Write Mode"
+                  >
+                    <FileText size={11} /> Write
+                  </button>
+                  <div className="flex items-center gap-0 bg-white/20 rounded-lg overflow-hidden border border-white/30 shrink-0">
+                    <button onClick={zoomOut} className="px-1.5 py-1 text-white text-[11px] font-black hover:bg-white/20 transition-colors" title="Zoom Out">A-</button>
+                    <span className="px-0.5 text-white/80 text-[9px] font-bold min-w-[24px] text-center">{Math.round(noteZoom * 100)}%</span>
+                    <button onClick={zoomIn} className="px-1.5 py-1 text-white text-[11px] font-black hover:bg-white/20 transition-colors" title="Zoom In">A+</button>
+                  </div>
+                  <button
+                    onClick={handleRotate}
+                    className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${isLandscape ? 'bg-green-400 text-white border-green-400 shadow-sm' : 'bg-white/20 text-white border-white/30 hover:bg-white/30'}`}
+                    title="Screen Rotate"
+                  >
+                    <RotateCcw size={11} /> Rot
+                  </button>
+                </div>
+              )}
+              {/* Save offline — mode-aware: read mode → chunk container, write mode → html container */}
               <button
                 onClick={async () => {
                   try {
                     const safeTitle = (activeHw.title || 'Homework').replace(/[^a-z0-9_\- ]/gi, '_').slice(0, 60);
-                    await downloadAsMHTML('hw-note-printable', `${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
-                      appName: settings?.appShortName || settings?.appName || 'IIC',
-                      pageTitle: activeHw.title || 'Homework',
-                      subtitle: 'Homework Notes',
+                    const _dlOk = await checkAndDoDownload(async () => {
+                      if (hwNotesViewMode === 'html' && (activeHw as any).htmlNotes) {
+                        await downloadAsMHTML('hw-html-download', safeTitle, { appName: settings?.appShortName || settings?.appName || 'IIC', pageTitle: activeHw.title || 'Homework', subtitle: 'Homework Notes — Write Mode' });
+                      } else {
+                        await downloadAsMHTML('hw-note-printable', `${safeTitle}_${new Date().toISOString().slice(0,10)}`, { appName: settings?.appShortName || settings?.appName || 'IIC', pageTitle: activeHw.title || 'Homework', subtitle: 'Homework Notes' });
+                      }
                     });
-                    showAlert('📥 Saved offline!', 'SUCCESS');
+                    if (_dlOk) showAlert('📥 Saved!', 'SUCCESS');
                   } catch (e) {
                     showAlert('Download failed. Please try again.', 'ERROR');
                   }
@@ -3277,7 +4282,7 @@ export const StudentDashboard: React.FC<Props> = ({
             {effectiveMode !== 'choose' && (
             <div
               ref={hwScrollContainerRef}
-              className="flex-1 overflow-y-auto"
+              className={`flex-1 overflow-y-auto ${!hwImmersive ? 'pb-[72px]' : ''}`}
               onScroll={(e) => {
                 const t = e.currentTarget;
                 const max = t.scrollHeight - t.clientHeight;
@@ -3314,8 +4319,8 @@ export const StudentDashboard: React.FC<Props> = ({
               {effectiveMode === 'notes' && (
                 <>
                   {/* Top header row with switch-to-MCQ button (mirrors MCQ mode's top row) */}
-                  <div className="px-4 pt-3 pb-2 flex items-center justify-between">
-                    <p className={`text-[10px] font-black ${theme.text} uppercase tracking-widest flex items-center gap-1`}>
+                  <div className="px-4 pt-3 pb-2 flex items-center gap-2">
+                    <p className={`text-[10px] font-black ${theme.text} uppercase tracking-widest flex items-center gap-1 flex-1`}>
                       <BookOpen size={11} /> Notes
                     </p>
                     {hasMcq && (
@@ -3328,11 +4333,81 @@ export const StudentDashboard: React.FC<Props> = ({
                     )}
                   </div>
 
+                  {/* Topic continuation banner */}
+                  {continuationPages.length > 0 && (
+                    <div className="mx-4 mb-2 bg-indigo-50 border border-indigo-200 rounded-xl px-3 py-2 flex items-center gap-2">
+                      <span className="text-base shrink-0">📌</span>
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-black text-indigo-800 leading-tight">
+                          Yeh topic {continuationPages.length + 1} pages mein hai
+                        </p>
+                        <p className="text-[10px] text-indigo-600 leading-tight">
+                          Saare pages ke notes mila ke ek saath dikh rahe hain — topic poora hone tak
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
                   {hasNotes && (
-                    <div className="px-4 pb-2">
+                    <div className={hwNotesViewMode === 'html' ? '' : 'px-4 pb-2'}>
+                      {hwNotesViewMode === 'html' ? (
+                        /* ── Write Mode: Full-page HTML rendered view ── */
+                        <div>
+                          {((activeHw as any).htmlNotes || combinedNotes) ? (
+                            <div>
+                              <div style={{ zoom: noteZoom, transformOrigin: 'top left' }}>
+                                <div
+                                  id="hw-html-download"
+                                  className="notes-html-content"
+                                  style={{ fontSize: '15px', lineHeight: '1.8', padding: '0 16px 24px' }}
+                                  dangerouslySetInnerHTML={{ __html: processHtmlForWriteMode((activeHw as any).htmlNotes || combinedNotes || '') }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="bg-slate-50 rounded-2xl p-8 text-center border border-slate-200 mx-4 mt-4">
+                              <FileText size={32} className="text-slate-300 mx-auto mb-2" />
+                              <p className="text-sm font-bold text-slate-500">HTML notes abhi add nahi hue</p>
+                              <p className="text-xs text-slate-400 mt-1">Admin se HTML/CSS formatted notes add karwayein</p>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                      /* ── Read Mode: ChunkedNotesReader TTS ── */
                       <ChunkedNotesReader
-                        content={activeHw.notes!}
+                        key={`hw-reader-${activeHw.id}-chunk`}
+                        isUltraUser={_canViewHtmlFree}
+                        userCredits={user.credits || 0}
+                        htmlUnlockCost={settings?.htmlUnlockCost ?? 5}
+                        onHtmlOpen={_trackBasicHtmlOpen}
+                        onSpendCredits={(amt) => handleUserUpdate({ ...user, credits: Math.max(0, (user.credits || 0) - amt) })}
+                        htmlContent={(() => {
+                          const chunkSrc = (activeHw as any).chunkNotes;
+                          const htmlSrc = (activeHw as any).htmlNotes;
+                          // Only pass htmlContent when BOTH exist — so HTML button stays visible
+                          // while chunkNotes drives the TTS read mode.
+                          return chunkSrc?.trim() && htmlSrc?.trim() ? htmlSrc.trim() : undefined;
+                        })()}
+                        content={(() => {
+                          const chunkSrc = (activeHw as any).chunkNotes;
+                          const htmlSrc = (activeHw as any).htmlNotes;
+                          // chunkNotes = plain markdown → pass as-is (newlines matter for markdown parsing)
+                          if (chunkSrc?.trim()) return chunkSrc.trim();
+                          // htmlNotes = full HTML → pass as-is (ChunkedNotesReader handles HTML)
+                          if (htmlSrc?.trim()) return htmlSrc.trim();
+                          // Legacy notes field — strip HTML but preserve line breaks
+                          return combinedNotes
+                            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                            .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+                            .replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+                            .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/[ \t]+/g, ' ')
+                            .replace(/\n{3,}/g, '\n\n').trim();
+                        })()}
                         topBarLabel={activeHw.title}
+                        hideTopBar={hwImmersive}
+                        suppressStickyControls={hwImmersive}
+                        preferChunkMode={true}
                         searchQuery={pendingReadQuery}
                         getStarCount={getNoteStarCount}
                         initialIndex={activeHw.id ? hwNotePositions[activeHw.id] ?? null : null}
@@ -3399,6 +4474,7 @@ export const StudentDashboard: React.FC<Props> = ({
                           }
                         ) : undefined}
                       />
+                      )}
                     </div>
                   )}
 
@@ -3445,7 +4521,7 @@ export const StudentDashboard: React.FC<Props> = ({
 
                   {/* Full-screen in-app PDF viewer */}
                   {hwActivePdf && (
-                    <div className="fixed inset-0 z-[300] bg-black flex flex-col" style={{ top: 0, left: 0 }}>
+                    <div className="fixed inset-0 z-[300] bg-black flex flex-col" style={{ top: -14, left: 0, right: 0, bottom: 0 }}>
                       <div className="flex items-center justify-between px-4 py-3 bg-gray-900 shrink-0">
                         <span className="text-white font-bold text-sm truncate pr-4">PDF</span>
                         <button onClick={() => setHwActivePdf(null)} className="text-white p-1.5 rounded-full hover:bg-white/10 active:scale-95 transition-all shrink-0">
@@ -3666,12 +4742,12 @@ export const StudentDashboard: React.FC<Props> = ({
                             >
                               🔄 Phir se Try Karo
                             </button>
-                            {nextHw && (
+                            {effectiveNextHw && (
                               <button
-                                onClick={() => goToHw(nextHw)}
+                                onClick={() => goToHw(effectiveNextHw)}
                                 className={`flex-1 text-[12px] font-black text-white ${theme.btn} ${theme.btnHover} py-2 rounded-xl active:scale-95 transition-all flex items-center justify-center gap-1`}
                               >
-                                Aage badho <ChevronRight size={14} />
+                                Next Topic <ChevronRight size={14} />
                               </button>
                             )}
                           </div>
@@ -3682,15 +4758,24 @@ export const StudentDashboard: React.FC<Props> = ({
                 </div>
               )}
 
-              {!nextHw && (
+              {!effectiveNextHw && (
                 <p className="text-center text-xs text-slate-400 font-bold py-6">🎉 All notes complete!</p>
               )}
             </div>
             )}
 
-            {/* Fixed bottom nav (hidden in chooser mode) */}
-            {effectiveMode !== 'choose' && (
-            <div className="shrink-0 border-t border-slate-100 bg-white px-4 py-3 flex items-center gap-3">
+            {/* Floating immersive toggle button — sits above bottom bar when visible */}
+            <button
+              onClick={() => setHwImmersive(v => !v)}
+              className={`fixed ${!hwImmersive && effectiveMode !== 'choose' ? 'bottom-[88px]' : 'bottom-5'} right-4 z-[9999] w-12 h-12 rounded-full shadow-xl flex items-center justify-center text-white text-xl transition-all ${hwImmersive ? 'bg-slate-900' : 'bg-blue-600'}`}
+              title={hwImmersive ? 'UI wapas laao' : 'Focus Mode — UI chhupao'}
+            >
+              {hwImmersive ? '↩' : '★'}
+            </button>
+
+            {/* Fixed bottom nav — always at screen bottom, hidden only in immersive/chooser */}
+            {effectiveMode !== 'choose' && !hwImmersive && (
+            <div className="fixed bottom-0 left-0 right-0 z-[160] border-t border-slate-100 bg-white px-4 py-3 flex items-center gap-3">
               <button
                 disabled={!prevHw}
                 onClick={() => prevHw && goToHw(prevHw)}
@@ -3699,11 +4784,11 @@ export const StudentDashboard: React.FC<Props> = ({
                 <ChevronRight size={16} className="rotate-180" /> Prev
               </button>
               <button
-                disabled={!nextHw}
-                onClick={() => nextHw && goToHw(nextHw)}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-3 rounded-2xl font-bold text-sm transition-all ${nextHw ? `${theme.btn} ${theme.btnHover} text-white shadow-md active:scale-95` : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}
+                disabled={!effectiveNextHw}
+                onClick={() => effectiveNextHw && goToHw(effectiveNextHw)}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-3 rounded-2xl font-bold text-sm transition-all ${effectiveNextHw ? `${theme.btn} ${theme.btnHover} text-white shadow-md active:scale-95` : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}
               >
-                Next <ChevronRight size={16} />
+                Next Topic <ChevronRight size={16} />
               </button>
             </div>
             )}
@@ -3745,10 +4830,13 @@ export const StudentDashboard: React.FC<Props> = ({
                     }
                   };
                   return (
-                    <button
+                    <div
                       key={hw.id || idx}
+                      role="button"
+                      tabIndex={0}
                       onClick={openHw}
-                      className={`w-full text-left bg-white border-2 ${theme.border} rounded-2xl p-4 flex items-center gap-3 hover:shadow-md transition-all active:scale-[0.98]`}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openHw(); }}
+                      className={`w-full text-left bg-white border-2 ${theme.border} rounded-2xl p-4 flex items-center gap-3 hover:shadow-md transition-all active:scale-[0.98] cursor-pointer`}
                     >
                       <div className={`${theme.bgSoft} ${theme.textDeep} w-14 h-14 rounded-xl flex flex-col items-center justify-center shrink-0`}>
                         <span className="text-xl font-black leading-none">{d.getDate()}</span>
@@ -3756,9 +4844,17 @@ export const StudentDashboard: React.FC<Props> = ({
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className={`text-[10px] font-bold ${theme.text} uppercase tracking-widest`}>{dayName}</p>
-                        <p className="font-black text-slate-800 text-sm leading-snug truncate">{hw.title}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="font-black text-slate-800 text-sm leading-snug truncate flex-1">{hw.title}</p>
+                          {(hw.notes || (hw as any).chunkNotes || (hw as any).htmlNotes) && (
+                            <div className="flex gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                              <button onClick={(e) => { e.stopPropagation(); setHwNotesViewMode('chunk'); openHw(); }} className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-black transition-all ${hwNotesViewMode === 'chunk' ? 'bg-amber-500 text-white' : `${theme.chip} opacity-70`}`} title="Read Mode"><Volume2 size={9}/> Read</button>
+                              <button onClick={(e) => { e.stopPropagation(); setHwNotesViewMode('html'); openHw(); }} className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-black transition-all ${hwNotesViewMode === 'html' ? 'bg-teal-600 text-white' : `${theme.chip} opacity-70`}`} title="Write Mode"><FileText size={9}/> Write</button>
+                            </div>
+                          )}
+                        </div>
                         <div className="flex gap-1 mt-1">
-                          {hw.notes && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>NOTES</span>}
+                          {(hw.notes || (hw as any).chunkNotes || (hw as any).htmlNotes) && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>NOTES</span>}
                           {hw.parsedMcqs && hw.parsedMcqs.length > 0 && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>{hw.parsedMcqs.length} MCQ</span>}
                           {hw.audioUrl && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>AUDIO</span>}
                           {hw.videoUrl && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>VIDEO</span>}
@@ -3766,7 +4862,7 @@ export const StudentDashboard: React.FC<Props> = ({
                         </div>
                       </div>
                       <ChevronRight size={18} className={`${theme.text} shrink-0`} />
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -3829,7 +4925,7 @@ export const StudentDashboard: React.FC<Props> = ({
                           <p className={`text-[10px] font-bold ${theme.text} uppercase tracking-widest`}>{dayName}</p>
                           <p className="font-black text-slate-800 text-sm leading-snug truncate">{hw.title}</p>
                           <div className="flex gap-1 mt-1">
-                            {hw.notes && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>NOTES</span>}
+                            {(hw.notes || (hw as any).chunkNotes || (hw as any).htmlNotes) && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>NOTES</span>}
                             {hw.parsedMcqs && hw.parsedMcqs.length > 0 && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>{hw.parsedMcqs.length} MCQ</span>}
                             {hw.audioUrl && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>AUDIO</span>}
                             {hw.videoUrl && <span className={`text-[9px] font-bold ${theme.chip} px-1.5 py-0.5 rounded`}>VIDEO</span>}
@@ -3955,26 +5051,37 @@ export const StudentDashboard: React.FC<Props> = ({
                     const d = new Date(hw.date);
                     const monthYear = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
                     return (
-                      <button
+                      <div
                         key={hw.id}
+                        role="button"
+                        tabIndex={0}
                         onClick={() => setHwActiveHwId(hw.id || null)}
-                        className={`w-full bg-white border-2 ${theme.border} rounded-2xl p-3 text-left hover:shadow-md transition-all active:scale-[0.99] flex items-center gap-3`}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setHwActiveHwId(hw.id || null); }}
+                        className={`w-full bg-white border ${theme.border} rounded-xl p-2 text-left hover:shadow-md transition-all active:scale-[0.99] flex items-center gap-2.5 cursor-pointer`}
                       >
-                        <div className={`${theme.bgSoft} ${theme.textDeep} w-14 h-14 rounded-xl shrink-0 flex flex-col items-center justify-center`}>
-                          <span className="text-[9px] font-bold uppercase tracking-wider opacity-70">Page</span>
-                          <span className="text-lg font-black leading-none">{pageNum}</span>
+                        <div className={`${theme.bgSoft} ${theme.textDeep} w-10 h-10 rounded-lg shrink-0 flex flex-col items-center justify-center`}>
+                          <span className="text-[8px] font-bold uppercase tracking-wider opacity-60">Pg</span>
+                          <span className="text-base font-black leading-none">{pageNum}</span>
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className={`text-sm font-black ${theme.textDeep} truncate`}>{hw.title || `Page ${pageNum}`}</p>
-                          <div className="flex items-center gap-2 mt-1 flex-wrap">
-                            {mcqCount > 0 && (
-                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${theme.chip}`}>{mcqCount} MCQ</span>
+                          <div className="flex items-center gap-1.5">
+                            <p className={`text-sm font-black ${theme.textDeep} truncate flex-1`}>{hw.title || `Page ${pageNum}`}</p>
+                            {((hw as any).chunkNotes || (hw as any).htmlNotes || hw.notes) && (
+                              <div className="flex gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                                <button onClick={(e) => { e.stopPropagation(); setHwNotesViewMode('chunk'); setHwActiveHwId(hw.id || null); }} className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-black transition-all ${hwNotesViewMode === 'chunk' ? 'bg-amber-500 text-white' : `${theme.chip} opacity-70`}`} title="Read Mode"><Volume2 size={9}/> Read</button>
+                                <button onClick={(e) => { e.stopPropagation(); setHwNotesViewMode('html'); setHwActiveHwId(hw.id || null); }} className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-black transition-all ${hwNotesViewMode === 'html' ? 'bg-teal-600 text-white' : `${theme.chip} opacity-70`}`} title="Write Mode"><FileText size={9}/> Write</button>
+                              </div>
                             )}
-                            <span className={`text-[10px] font-bold ${theme.text} bg-slate-50 px-1.5 py-0.5 rounded`}>{monthYear}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                            {mcqCount > 0 && (
+                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${theme.chip}`}>{mcqCount} MCQ</span>
+                            )}
+                            <span className={`text-[9px] font-bold ${theme.text} opacity-60`}>{monthYear}</span>
                           </div>
                         </div>
-                        <ChevronRight size={18} className={theme.text} />
-                      </button>
+                        <ChevronRight size={15} className={`${theme.text} shrink-0`} />
+                      </div>
                     );
                   })}
 
@@ -4167,28 +5274,113 @@ export const StudentDashboard: React.FC<Props> = ({
 
     // LUCENT BOOK CATEGORY VIEW
     if (lucentCategoryView && contentViewStep === "SUBJECTS") {
+      // Helper: min page number of an entry
+      const _minPgBook = (n: LucentNoteEntry): number => {
+        let m = Infinity;
+        (n.pages || []).forEach(p => { const x = parseInt(p.pageNo || '', 10); if (!isNaN(x) && x < m) m = x; });
+        return m === Infinity ? 99999 : m;
+      };
+      // All COMPETITION-level admin notes
+      const competitionNotes = (settings?.lucentNotes || []) as LucentNoteEntry[];
+      // Unique book names — entries with no bookName fall under 'Lucent'
+      const uniqueBooks: string[] = Array.from(
+        new Set(competitionNotes.map(n => (n.bookName?.trim()) || 'Lucent'))
+      ).sort((a, b) => a === 'Lucent' ? -1 : b === 'Lucent' ? 1 : a.localeCompare(b));
+
+      const BOOK_THEME: Record<string, { bg: string; text: string; border: string; emoji: string }> = {
+        'Lucent':               { bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200', emoji: '📘' },
+        'Speedy Science':       { bg: 'bg-blue-50',   text: 'text-blue-700',   border: 'border-blue-200',   emoji: '🔬' },
+        'Speedy Social Science':{ bg: 'bg-orange-50', text: 'text-orange-700', border: 'border-orange-200', emoji: '🌏' },
+        'Sar Sangrah':          { bg: 'bg-rose-50',   text: 'text-rose-700',   border: 'border-rose-200',   emoji: '📕' },
+      };
+      const defaultTheme = { bg: 'bg-violet-50', text: 'text-violet-700', border: 'border-violet-200', emoji: '📗' };
+
+      // STEP 1 — Book selection screen
+      if (selectedLucentBook === null) {
+        return (
+          <div className="p-4 pt-2 max-w-3xl mx-auto pb-8 animate-in fade-in">
+            <div className="flex items-center gap-3 mb-5">
+              <button onClick={() => { setLucentCategoryView(false); setSelectedSubject(null); }} className="bg-slate-100 p-2 rounded-full hover:bg-slate-200 text-slate-700">
+                <ChevronRight size={18} className="rotate-180" />
+              </button>
+              <div>
+                <h2 className="text-xl font-black text-slate-800">📚 Books</h2>
+                <p className="text-xs text-slate-500">Ek book choose karo</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3">
+              {uniqueBooks.length === 0 ? (
+                <div className="text-center py-16 text-slate-400">
+                  <p className="text-3xl mb-3">📭</p>
+                  <p className="font-bold text-slate-600">Abhi koi notes nahi hain</p>
+                  <p className="text-xs mt-1">Admin ne notes add kiye baad mein yahan aayenge.</p>
+                </div>
+              ) : uniqueBooks.map(bookName => {
+                const count = competitionNotes.filter(n => (n.bookName?.trim() || 'Lucent') === bookName).length;
+                const theme = BOOK_THEME[bookName] || defaultTheme;
+                return (
+                  <button key={bookName} onClick={() => {
+                    setSelectedLucentBook(bookName);
+                    if (bookName !== 'Lucent') {
+                      // Non-Lucent books: skip subject step, show all lessons directly
+                      const bookNotes = competitionNotes
+                        .filter(n => (n.bookName?.trim() || 'Lucent') === bookName)
+                        .sort((a, b) => _minPgBook(a) - _minPgBook(b));
+                      const directChapters: Chapter[] = bookNotes.map(n => {
+                        const mp = _minPgBook(n);
+                        return {
+                          id: `lucent_admin_${n.id}`,
+                          title: n.lessonTitle,
+                          description: `${theme.emoji} ${bookName} • ${n.pages.length} page${n.pages.length === 1 ? '' : 's'}`,
+                          pageNo: mp < 99999 ? String(mp) : undefined,
+                        };
+                      });
+                      setChapters(directChapters);
+                      setLoadingChapters(false);
+                      setSelectedSubject({ id: bookName.toLowerCase().replace(/\s+/g, '_'), name: bookName, icon: 'book', color: `${theme.bg} ${theme.text}` });
+                      setContentViewStep("CHAPTERS");
+                    }
+                    // For 'Lucent': stay on SUBJECTS — LUCENT_CATEGORIES grid will render next
+                  }} className={`${theme.bg} border-2 ${theme.border} p-4 rounded-2xl flex items-center gap-4 hover:shadow-md transition-all active:scale-95 text-left`}>
+                    <div className={`w-12 h-12 rounded-xl ${theme.bg} ${theme.border} border flex items-center justify-center text-2xl`}>
+                      {theme.emoji}
+                    </div>
+                    <div className="flex-1">
+                      <p className={`font-black text-base ${theme.text}`}>{bookName}</p>
+                      <p className="text-xs text-slate-500">{count} lesson{count !== 1 ? 's' : ''}</p>
+                    </div>
+                    <ChevronRight size={18} className="text-slate-400" />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      }
+
+      // STEP 2 — Subject categories (only for 'Lucent' book)
       return (
         <div className="p-4 pt-2 max-w-3xl mx-auto pb-8 animate-in fade-in">
           <div className="flex items-center gap-3 mb-5">
-            <button onClick={() => { setLucentCategoryView(false); setSelectedSubject(null); }} className="bg-slate-100 p-2 rounded-full hover:bg-slate-200 text-slate-700">
+            <button onClick={() => { setSelectedLucentBook(null); setSelectedSubject(null); }} className="bg-slate-100 p-2 rounded-full hover:bg-slate-200 text-slate-700">
               <ChevronRight size={18} className="rotate-180" />
             </button>
             <div>
-              <h2 className="text-xl font-black text-slate-800">Lucent Book</h2>
-              <p className="text-xs text-slate-500">Pick a subject</p>
+              <h2 className="text-xl font-black text-slate-800">{selectedLucentBook}</h2>
+              <p className="text-xs text-slate-500">Subject chuniye</p>
             </div>
           </div>
           <div className="grid grid-cols-1 gap-3">
             {LUCENT_CATEGORIES.map((cat) => (
               <button key={cat.id} onClick={() => {
                 setLucentCategoryView(false);
+                setSelectedLucentBook(null);
                 setSelectedSubject(cat);
                 setContentViewStep("CHAPTERS");
                 setSelectedChapter(null);
                 setLoadingChapters(true);
                 const lang = (activeSessionBoard || user.board) === "BSEB" ? "Hindi" : "English";
-                // Inject admin-added Lucent lessons (page-wise notes) at the top of the chapter list
-                // Page-number wise sort: lesson covering lowest page first.
                 const _minPg = (n: LucentNoteEntry): number => {
                   let m = Infinity;
                   (n.pages || []).forEach(p => {
@@ -4197,8 +5389,9 @@ export const StudentDashboard: React.FC<Props> = ({
                   });
                   return m === Infinity ? 99999 : m;
                 };
+                // Only include entries belonging to 'Lucent' book
                 const adminLucentLessons: Chapter[] = ((settings?.lucentNotes || []) as LucentNoteEntry[])
-                  .filter(n => n.subject === cat.id)
+                  .filter(n => n.subject === cat.id && (n.bookName?.trim() || 'Lucent') === 'Lucent')
                   .sort((a, b) => _minPg(a) - _minPg(b))
                   .map(n => {
                     const mp = _minPg(n);
@@ -4209,7 +5402,6 @@ export const StudentDashboard: React.FC<Props> = ({
                       pageNo: mp < 99999 ? String(mp) : undefined,
                     };
                   });
-                // Default: hide built-in/AI Lucent syllabus. Admin can re-enable it from the Lucent panel.
                 const hideSyllabus = settings?.hideLucentSyllabus !== false;
                 if (hideSyllabus) {
                   setChapters(adminLucentLessons);
@@ -4259,8 +5451,7 @@ export const StudentDashboard: React.FC<Props> = ({
               const noteId = chapter.id.replace('lucent_admin_', '');
               const entry = (settings?.lucentNotes || []).find(n => n.id === noteId);
               if (entry) {
-                setLucentNoteViewer(entry);
-                setLucentPageIndex(0);
+                setLucentPageListViewer(entry);
                 return;
               }
             }
@@ -4324,9 +5515,12 @@ export const StudentDashboard: React.FC<Props> = ({
             onBack={goBack}
             user={user}
             settings={settings}
+            hideHeader={isLandscapeUiHidden}
+            onImmersiveChange={(v) => setIsInternalImmersive(v)}
             // Lucent-style cross-tab switching: lets the student jump from
             // Notes (PdfView) → MCQ (McqView) without going back to the modal.
             onSwitchToMcq={() => handleLessonOption('MCQ')}
+            onSwitchToFlashcard={() => handleLessonOption('FLASHCARD')}
             {...contentProps}
           />
         );
@@ -4337,8 +5531,10 @@ export const StudentDashboard: React.FC<Props> = ({
             onBack={goBack}
             user={user}
             settings={settings}
+            hideHeader={isLandscapeUiHidden}
             // Lucent-style cross-tab switching: from MCQ → Notes (PdfView).
             onSwitchToNotes={() => handleLessonOption('PDF')}
+            onShareToCommunity={(mcq) => { setMcqCommunityDraft(mcq); setShowMcqCommunityPopup(true); }}
             {...contentProps}
           />
         );
@@ -4364,6 +5560,28 @@ export const StudentDashboard: React.FC<Props> = ({
       {
         category: "Essential",
         items: [
+          ...((settings?.hiddenBottomNavButtons || []).includes('HOMEWORK') ? [] : [{
+            id: "HOMEWORK_MENU",
+            label: "Homework",
+            icon: GraduationCap,
+            color: "emerald",
+            action: () => {
+              onTabChange("HOMEWORK");
+              setShowSidebar(false);
+            },
+            featureId: "HOMEWORK",
+          }]),
+          {
+            id: "GK_MENU",
+            label: "Daily GK",
+            icon: Sparkles,
+            color: "teal",
+            action: () => {
+              setShowDailyGkHistory(true);
+              setShowSidebar(false);
+            },
+            featureId: "GK_CORNER",
+          },
           {
             id: "INBOX",
             label: "Inbox",
@@ -4374,38 +5592,6 @@ export const StudentDashboard: React.FC<Props> = ({
               setShowSidebar(false);
             },
             featureId: "INBOX",
-          },
-          {
-            id: "UPDATES",
-            label: "Notifications",
-            icon: Bell,
-            color: "red",
-            action: () => {
-              onTabChange("UPDATES");
-              setHasNewUpdate(false);
-              localStorage.setItem(
-                "nst_last_read_update",
-                Date.now().toString(),
-              );
-              setShowSidebar(false);
-            },
-            featureId: "UPDATES",
-          },
-        ],
-      },
-      {
-        category: "Learning & Progress",
-        items: [
-          {
-            id: "HISTORY",
-            label: "History",
-            icon: History,
-            color: "slate",
-            action: () => {
-              onTabChange("HISTORY");
-              setShowSidebar(false);
-            },
-            featureId: "HISTORY_PAGE",
           },
         ],
       },
@@ -4439,24 +5625,9 @@ export const StudentDashboard: React.FC<Props> = ({
       {
         category: "Fun & Utilities",
         items: [
-          ...(isGameEnabled
-            ? [
-                {
-                  id: "GAME",
-                  label: "Play Game",
-                  icon: Gamepad2,
-                  color: "orange",
-                  action: () => {
-                    onTabChange("GAME");
-                    setShowSidebar(false);
-                  },
-                  featureId: "GAMES",
-                },
-              ]
-            : []),
           {
             id: "REQUEST",
-            label: "Request Content",
+            label: "Content Demand",
             icon: Megaphone,
             color: "purple",
             action: () => {
@@ -4467,27 +5638,6 @@ export const StudentDashboard: React.FC<Props> = ({
           },
         ],
       },
-      // Profile — surfaces inside the menu drawer when admin moved it out of
-      // the bottom nav (Revision Hub V2 enabled OR profileInMenuForced).
-      ...((settings?.revisionHubV2Enabled !== false || settings?.profileInMenuForced)
-        ? [{
-            category: "Account",
-            items: [
-              {
-                id: "PROFILE_MENU",
-                label: "Profile",
-                icon: UserIconOutline,
-                color: "indigo",
-                action: () => {
-                  onTabChange("PROFILE");
-                  setCurrentLogicalTab("PROFILE");
-                  setShowSidebar(false);
-                },
-                featureId: "PROFILE_PAGE",
-              },
-            ],
-          }]
-        : []),
       {
         category: "Help & Support",
         items: [
@@ -4632,7 +5782,7 @@ export const StudentDashboard: React.FC<Props> = ({
                 }
               }
             });
-            const merged: Merged[] = filtered.sort((a, b) => {
+            const allSorted: Merged[] = filtered.sort((a, b) => {
               const pa = a.kind === 'hw' ? parseInt(a.entry.hw?.pageNo || '', 10) : NaN;
               const pb = b.kind === 'hw' ? parseInt(b.entry.hw?.pageNo || '', 10) : NaN;
               const aHasPage = !isNaN(pa);
@@ -4652,7 +5802,9 @@ export const StudentDashboard: React.FC<Props> = ({
                 return pa - pb;
               }
               return b.ts - a.ts;
-            }).slice(0, 8);
+            });
+            const totalFiltered = allSorted.length;
+            const merged: Merged[] = allSorted.slice(0, showAllContinueReading ? 8 : 1);
             // Hide entire card only if there's nothing at all (filter empty states still show chips)
             if (allMerged.length === 0) return null;
             const FILTER_CHIPS: { key: typeof homeResumeFilter; label: string; emoji: string; count: number; activeBg: string; activeText: string }[] = [
@@ -4672,7 +5824,7 @@ export const StudentDashboard: React.FC<Props> = ({
                     </div>
                     <div className="min-w-0">
                       <p className="text-[10px] font-black text-indigo-700 uppercase tracking-widest">Continue Reading</p>
-                      <p className="text-xs text-slate-500 font-medium truncate">Where you left off</p>
+                      <p className="text-xs text-slate-500 font-medium truncate">Where you left off · <span className="text-indigo-400 font-bold">← swipe to remove</span></p>
                     </div>
                   </div>
                   <span className="text-[10px] font-bold text-indigo-600 bg-white px-2 py-0.5 rounded-full border border-indigo-200">
@@ -4715,31 +5867,24 @@ export const StudentDashboard: React.FC<Props> = ({
                     </button>
                   </div>
                 ) : (
-                <div className="flex gap-3 overflow-x-auto -mx-1 px-1 pb-1 scrollbar-hide snap-x">
+                <div className="flex flex-col gap-2">
                   {merged.map(item => {
                     if (item.kind === 'chapter') {
                       const entry = item.entry;
                       return (
-                        <div
+                        <SwipeToDismiss
                           key={`ch_${entry.id}`}
-                          className="relative shrink-0 w-56 snap-start bg-white rounded-2xl border border-slate-200 shadow-sm p-3 flex flex-col gap-2 active:scale-[0.98] transition-transform"
+                          onDismiss={() => dismissRecentChapter(entry.id)}
+                          className="bg-white rounded-2xl border border-slate-200 shadow-sm p-3 flex flex-col gap-2"
                         >
-                          <button
-                            onClick={(e) => { e.stopPropagation(); dismissRecentChapter(entry.id); }}
-                            className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center"
-                            aria-label="Remove"
-                            title="Remove"
-                          >
-                            <X size={12} />
-                          </button>
                           <button
                             onClick={() => openRecentChapter(entry)}
                             className="text-left"
                           >
-                            <p className="text-[9px] font-black text-indigo-600 uppercase tracking-widest truncate pr-6">
+                            <p className="text-[9px] font-black text-indigo-600 uppercase tracking-widest truncate">
                               Class {entry.classLevel} · {entry.subject?.name || 'Subject'}
                             </p>
-                            <p className="text-sm font-black text-slate-800 leading-snug line-clamp-2 mt-1 pr-6">
+                            <p className="text-sm font-black text-slate-800 leading-snug line-clamp-2 mt-1">
                               {entry.chapter?.title || 'Chapter'}
                             </p>
                           </button>
@@ -4808,10 +5953,12 @@ export const StudentDashboard: React.FC<Props> = ({
                                     wrapper.style.left = '-9999px';
                                     document.body.appendChild(wrapper);
                                     const fname = (entry.chapter?.title || 'chapter').slice(0,40).replace(/[^a-z0-9]+/gi,'_');
-                                    await downloadAsMHTML(wrapper.id, `${fname}_${new Date().toISOString().slice(0,10)}`, {
-                                      appName: settings?.appShortName || settings?.appName || 'IIC',
-                                      pageTitle: entry.chapter?.title || 'Chapter',
-                                      subtitle: `Class ${entry.classLevel || ''} · ${entry.subject?.name || ''}`.trim(),
+                                    await checkAndDoDownload(async () => {
+                                      await downloadAsMHTML(wrapper.id, `${fname}_${new Date().toISOString().slice(0,10)}`, {
+                                        appName: settings?.appShortName || settings?.appName || 'IIC',
+                                        pageTitle: entry.chapter?.title || 'Chapter',
+                                        subtitle: `Class ${entry.classLevel || ''} · ${entry.subject?.name || ''}`.trim(),
+                                      });
                                     });
                                     setTimeout(() => { try { document.body.removeChild(wrapper); } catch {} }, 500);
                                   } catch (err) { console.error(err); }
@@ -4823,30 +5970,23 @@ export const StudentDashboard: React.FC<Props> = ({
                               </button>
                             </div>
                           </div>
-                        </div>
+                        </SwipeToDismiss>
                       );
                     }
                     // Lucent book page card
                     if (item.kind === 'lucent') {
                       const entry = item.entry;
                       return (
-                        <div
+                        <SwipeToDismiss
                           key={`luc_${entry.id}`}
-                          className="relative shrink-0 w-56 snap-start bg-white rounded-2xl border border-teal-200 shadow-sm p-3 flex flex-col gap-2 active:scale-[0.98] transition-transform"
+                          onDismiss={() => { removeRecentLucent(entry.id); setRecentLucent(getRecentLucent()); }}
+                          className="bg-white rounded-2xl border border-teal-200 shadow-sm p-3 flex flex-col gap-2"
                         >
-                          <button
-                            onClick={(e) => { e.stopPropagation(); removeRecentLucent(entry.id); setRecentLucent(getRecentLucent()); }}
-                            className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center"
-                            aria-label="Remove"
-                            title="Remove"
-                          >
-                            <X size={12} />
-                          </button>
                           <button
                             onClick={() => openRecentLucent(entry)}
                             className="text-left"
                           >
-                            <div className="flex items-center gap-1 flex-wrap pr-6">
+                            <div className="flex items-center gap-1 flex-wrap">
                               <span className="inline-block text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest bg-teal-100 text-teal-700">
                                 📗 Lucent
                               </span>
@@ -4856,7 +5996,7 @@ export const StudentDashboard: React.FC<Props> = ({
                                 </span>
                               )}
                             </div>
-                            <p className="text-sm font-black text-slate-800 leading-snug line-clamp-2 mt-1 pr-6">
+                            <p className="text-sm font-black text-slate-800 leading-snug line-clamp-2 mt-1">
                               {entry.lessonTitle}
                             </p>
                             <p className="text-[10px] text-slate-500 font-semibold mt-0.5 truncate">{entry.subject}</p>
@@ -4878,30 +6018,23 @@ export const StudentDashboard: React.FC<Props> = ({
                               </button>
                             </div>
                           </div>
-                        </div>
+                        </SwipeToDismiss>
                       );
                     }
                     // homework note (Sar Sangrah / Speedy) — page-wise card
                     const entry = item.entry;
                     const meta = HW_SUBJECT_META[entry.targetSubject || ''] || HW_SUBJECT_META.sarSangrah;
                     return (
-                      <div
+                      <SwipeToDismiss
                         key={`hw_${entry.id}`}
-                        className="relative shrink-0 w-56 snap-start bg-white rounded-2xl border border-slate-200 shadow-sm p-3 flex flex-col gap-2 active:scale-[0.98] transition-transform"
+                        onDismiss={() => dismissRecentHw(entry.id)}
+                        className="bg-white rounded-2xl border border-slate-200 shadow-sm p-3 flex flex-col gap-2"
                       >
-                        <button
-                          onClick={(e) => { e.stopPropagation(); dismissRecentHw(entry.id); }}
-                          className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center"
-                          aria-label="Remove"
-                          title="Remove"
-                        >
-                          <X size={12} />
-                        </button>
                         <button
                           onClick={() => openRecentHw(entry)}
                           className="text-left"
                         >
-                          <div className="flex items-center gap-1 flex-wrap pr-6">
+                          <div className="flex items-center gap-1 flex-wrap">
                             <span className={`inline-block text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest ${meta.chipBg} ${meta.chipText}`}>
                               {meta.label}
                             </span>
@@ -4911,7 +6044,7 @@ export const StudentDashboard: React.FC<Props> = ({
                               </span>
                             )}
                           </div>
-                          <p className="text-sm font-black text-slate-800 leading-snug line-clamp-2 mt-1 pr-6">
+                          <p className="text-sm font-black text-slate-800 leading-snug line-clamp-2 mt-1">
                             {entry.title}
                           </p>
                         </button>
@@ -4932,9 +6065,21 @@ export const StudentDashboard: React.FC<Props> = ({
                             </button>
                           </div>
                         </div>
-                      </div>
+                      </SwipeToDismiss>
                     );
                   })}
+                  {/* More / Less toggle */}
+                  {totalFiltered > 1 && (
+                    <button
+                      onClick={() => setShowAllContinueReading(v => !v)}
+                      className="w-full mt-1 py-2 flex items-center justify-center gap-1.5 rounded-xl text-[11px] font-black transition-all active:scale-95 border border-dashed border-indigo-200 text-indigo-600 bg-white hover:bg-indigo-50"
+                    >
+                      {showAllContinueReading
+                        ? <><ChevronUp size={12} /> Less</>
+                        : <><ChevronDown size={12} /> More ({totalFiltered - 1} more)</>
+                      }
+                    </button>
+                  )}
                 </div>
                 )}
               </div>
@@ -5049,42 +6194,27 @@ export const StudentDashboard: React.FC<Props> = ({
                     <BookOpen className="text-blue-600 shrink-0" size={22} />
                     <span className="truncate">Select Class</span>
                   </h3>
-
-                  <div className="flex items-center gap-1.5 shrink-0 -mr-1">
-                    {/* BOARD SELECTION TOGGLE - shifted slightly left, more compact */}
-                    {isHomeSectionVisible('home_board_toggle', settings) && (
-                      <div className="flex items-center p-0.5 bg-slate-100 rounded-lg">
-                        <button
-                          onClick={() => setActiveSessionBoard("CBSE")}
-                          className={`px-2.5 py-1 text-[11px] font-bold rounded-md transition-all ${activeSessionBoard !== "BSEB" ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
-                        >
-                          CBSE
-                        </button>
-                        <button
-                          onClick={() => setActiveSessionBoard("BSEB")}
-                          className={`px-2.5 py-1 text-[11px] font-bold rounded-md transition-all ${activeSessionBoard === "BSEB" ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
-                        >
-                          BSEB
-                        </button>
-                      </div>
-                    )}
-                    {/* SEARCH ICON — more prominent, distinct from toggle */}
-                    {isHomeSectionVisible('home_search_button', settings) && (
-                      <button
-                        onClick={() => { setShowHomeSearch(s => !s); setHomeSearchQuery(''); }}
-                        className={`w-9 h-9 flex items-center justify-center rounded-xl transition-all active:scale-90 border ${showHomeSearch ? 'bg-blue-600 text-white border-blue-600 shadow-md' : 'bg-white text-blue-600 border-blue-200 hover:bg-blue-50 hover:border-blue-300 shadow-sm'}`}
-                        title="Search chapters or subjects"
-                        aria-label="Search"
-                      >
-                        <Search size={16} />
-                      </button>
-                    )}
-                  </div>
                 </div>
 
                 {/* CHAPTER SEARCH BAR */}
                 {showHomeSearch && (
                   <div className="mb-4 animate-in fade-in slide-in-from-top-1 duration-200">
+                    {/* Mode selector */}
+                    <div className="flex bg-slate-100 p-1 gap-1 rounded-xl mb-2">
+                      <button
+                        onClick={() => setHomeSearchMode('search')}
+                        className={`flex-1 py-2 text-xs font-black rounded-lg transition-all flex items-center justify-center gap-1.5 ${homeSearchMode === 'search' ? 'bg-white shadow text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
+                      >
+                        <Search size={12} /> Search
+                      </button>
+                      <button
+                        onClick={() => setHomeSearchMode('compare')}
+                        className={`flex-1 py-2 text-xs font-black rounded-lg transition-all flex items-center justify-center gap-1.5 ${homeSearchMode === 'compare' ? 'bg-white shadow text-violet-600' : 'text-slate-500 hover:text-slate-700'}`}
+                      >
+                        <GitCompare size={12} /> Compare
+                        <span className="text-[8px] font-black bg-violet-500 text-white px-1 py-0.5 rounded-full leading-none">BETA</span>
+                      </button>
+                    </div>
                     <div className="relative mb-2">
                       <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-400 pointer-events-none" />
                       <input
@@ -5092,8 +6222,8 @@ export const StudentDashboard: React.FC<Props> = ({
                         type="text"
                         value={homeSearchQuery}
                         onChange={e => setHomeSearchQuery(e.target.value)}
-                        placeholder="Search chapters or subjects..."
-                        className="w-full pl-8 pr-8 py-2.5 text-xs font-semibold bg-blue-50 border border-blue-200 rounded-xl text-slate-700 placeholder-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-300 transition-all"
+                        placeholder={homeSearchMode === 'compare' ? "Topic likhein — sab books mein compare karein..." : "Search chapters or subjects..."}
+                        className="w-full pl-12 pr-8 py-2.5 text-xs font-semibold bg-blue-50 border border-blue-200 rounded-xl text-slate-700 placeholder-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-300 transition-all"
                       />
                       {homeSearchQuery && (
                         <button
@@ -5104,7 +6234,100 @@ export const StudentDashboard: React.FC<Props> = ({
                         </button>
                       )}
                     </div>
-                    {homeSearchQuery.trim() && (() => {
+                    {/* Compare mode — Browse All Topics shortcut (when no query yet) */}
+                    {homeSearchMode === 'compare' && !homeSearchQuery.trim() && (
+                      <button
+                        onClick={() => setShowTopicDirectory(true)}
+                        className="w-full flex items-center gap-3 bg-gradient-to-r from-violet-600 to-indigo-600 text-white px-4 py-3 rounded-xl text-sm font-black active:scale-95 transition-all shadow-lg mb-2"
+                      >
+                        <List size={18} />
+                        📋 Saare Compare Topics Dekho
+                        <span className="ml-auto text-violet-200 text-xs font-bold">
+                          {(() => {
+                            let count = 0;
+                            const seen = new Set<string>();
+                            ((settings?.lucentNotes || []) as any[]).forEach((e: any) =>
+                              (e.pages || []).forEach((pg: any) => {
+                                if (pg.topicName?.trim() && !seen.has(pg.topicName.trim().toLowerCase())) {
+                                  seen.add(pg.topicName.trim().toLowerCase()); count++;
+                                }
+                              })
+                            );
+                            ((settings?.homework || []) as any[]).forEach((hw: any) => {
+                              if (hw.topicName?.trim() && !seen.has(hw.topicName.trim().toLowerCase())) {
+                                seen.add(hw.topicName.trim().toLowerCase()); count++;
+                              }
+                            });
+                            return count > 0 ? `${count} topics →` : '→';
+                          })()}
+                        </span>
+                      </button>
+                    )}
+                    {/* Compare mode — show Compare All button */}
+                    {homeSearchMode === 'compare' && homeSearchQuery.trim() && (
+                      <div className="mb-2">
+                        {(chapterNoteHitsLoading) ? (
+                          <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5">
+                            <div className="w-4 h-4 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin shrink-0" />
+                            <span className="text-xs text-violet-600 font-bold">Sab books mein dhundh raha hai...</span>
+                          </div>
+                        ) : (() => {
+                              const contentHits = [...chapterNoteHits, ...hwBookHits, ...lucentCompareHits];
+                              const seenKeys = new Set<string>();
+                              const topicHits: NoteSearchResult[] = [];
+                              [...contentHits, ...titleBasedHits, ...chapterTitleHits].forEach(h => {
+                                if (!seenKeys.has(h.storageKey)) { seenKeys.add(h.storageKey); topicHits.push(h); }
+                              });
+                              // Count unique books (by bookName/subjectName), not individual pages
+                              const uniqueContentBooks = new Set(contentHits.map(h => h.bookName || h.subjectName)).size;
+                              const uniqueTopicBooks = new Set(topicHits.map(h => h.bookName || h.subjectName)).size;
+                              if (topicHits.length === 0) return (
+                                <p className="text-center text-xs text-slate-400 font-bold py-2">Koi result nahi mila. Koi aur topic likhein.</p>
+                              );
+                              return (
+                                <div className="flex flex-col gap-2">
+                                  {uniqueContentBooks >= 2 && (
+                                    <button
+                                      onClick={() => {
+                                        const q = homeSearchQuery;
+                                        setCompareHits(contentHits);
+                                        setCompareQuery(q);
+                                        setShowCompareView(true);
+                                        setShowHomeSearch(false);
+                                        setHomeSearchQuery('');
+                                        setHomeSearchMode('search');
+                                        saveCompareAnalytic(q, uniqueContentBooks).catch(() => {});
+                                      }}
+                                      className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white px-4 py-3 rounded-xl text-sm font-black active:scale-95 transition-all shadow-lg"
+                                    >
+                                      <GitCompare size={18} />
+                                      ⚖️ Points se Compare — {uniqueContentBooks} Book{uniqueContentBooks !== 1 ? 's' : ''} · Common &amp; Extra Points
+                                    </button>
+                                  )}
+                                  {uniqueTopicBooks >= 2 && (
+                                    <button
+                                      onClick={() => {
+                                        const q = homeSearchQuery;
+                                        setCompareHits(topicHits);
+                                        setCompareQuery(q);
+                                        setShowCompareView(true);
+                                        setShowHomeSearch(false);
+                                        setHomeSearchQuery('');
+                                        setHomeSearchMode('search');
+                                        saveCompareAnalytic(`topic:${q}`, uniqueTopicBooks).catch(() => {});
+                                      }}
+                                      className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white px-4 py-3 rounded-xl text-sm font-black active:scale-95 transition-all shadow-lg"
+                                    >
+                                      <GitCompare size={18} />
+                                      📚 Topic se Compare — {uniqueTopicBooks} Book{uniqueTopicBooks !== 1 ? 's' : ''} · Pure Notes
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })()}
+                      </div>
+                    )}
+                    {homeSearchMode === 'search' && homeSearchQuery.trim() && (() => {
                       const q = homeSearchQuery.trim().toLowerCase();
                       const stripHtml = (s: string) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
                       // 1) Match recent chapters (resume-able)
@@ -5138,55 +6361,65 @@ export const StudentDashboard: React.FC<Props> = ({
                       const starResults = starredNotes
                         .filter(n => n.topicText?.toLowerCase().includes(q))
                         .slice(0, 5);
-                      // 4) Match inside admin Lucent page content (page-wise notes)
+                      // 4) Match inside admin page-wise notes (lucentNotes) — grouped by bookName
                       type LucentHit = { entry: LucentNoteEntry; pageIndex: number; pageNo: string; snippet: string };
-                      const lucentHits: LucentHit[] = [];
+                      const lucentHitsAll: LucentHit[] = [];
+                      const lucentSeenKeys = new Set<string>();
                       ((settings?.lucentNotes || []) as LucentNoteEntry[]).forEach(entry => {
                         (entry.pages || []).forEach((pg, pi) => {
+                          // Deduplicate by lessonTitle+pageNo — same lesson in multiple entries shows only once
+                          const dedupeKey = `${(entry.lessonTitle || '').toLowerCase()}_${pg.pageNo}`;
+                          if (lucentSeenKeys.has(dedupeKey)) return;
                           const text = stripHtml(pg.content || '').toLowerCase();
                           const titleHit = entry.lessonTitle?.toLowerCase().includes(q);
                           if (text.includes(q) || titleHit) {
+                            lucentSeenKeys.add(dedupeKey);
                             const idx = text.indexOf(q);
                             const start = Math.max(0, idx - 30);
                             const snippet = idx >= 0
                               ? stripHtml(pg.content).substring(start, start + 120)
                               : stripHtml(pg.content).substring(0, 120);
-                            lucentHits.push({ entry, pageIndex: pi, pageNo: pg.pageNo, snippet });
+                            lucentHitsAll.push({ entry, pageIndex: pi, pageNo: pg.pageNo, snippet });
                           }
                         });
                       });
-                      const lucentResults = lucentHits.slice(0, 8);
-                      // 5) Match inside admin homework notes (notes body — the
-                      //    HomeworkItem field is `notes`, not `text`).
-                      type HwHit = { hw: any; snippet: string };
-                      const hwHits: HwHit[] = [];
-                      (settings?.homework || []).forEach((hw: any) => {
-                        const body = hw.notes || hw.text || '';
-                        const text = stripHtml(body).toLowerCase();
-                        const titleHit = hw.title?.toLowerCase().includes(q);
-                        if (text.includes(q) || titleHit) {
-                          const idx = text.indexOf(q);
-                          const start = Math.max(0, idx - 30);
-                          const snippet = idx >= 0
-                            ? stripHtml(body).substring(start, start + 120)
-                            : stripHtml(body).substring(0, 120);
-                          hwHits.push({ hw, snippet });
-                        }
+                      // Group by book name, cap each book at 4 results
+                      type LucentBookGroup = { bookName: string; hits: LucentHit[] };
+                      const lucentByBook: Record<string, LucentBookGroup> = {};
+                      lucentHitsAll.forEach(h => {
+                        const bk = h.entry.bookName?.trim() || 'Lucent';
+                        if (!lucentByBook[bk]) lucentByBook[bk] = { bookName: bk, hits: [] };
+                        if (lucentByBook[bk].hits.length < 4) lucentByBook[bk].hits.push(h);
                       });
-                      const hwResults = hwHits.slice(0, 8);
-                      // 6) Match inside any cached Class 6-12 / Competition chapter
+                      const lucentBookGroups = Object.values(lucentByBook).slice(0, 6);
+                      // kept for totalCount
+                      const lucentResults = lucentHitsAll.slice(0, 8);
+                      // 5) Match inside any cached Class 6-12 / Competition chapter
                       //    notes (Concept / Retention / Teaching Strategy / deep
                       //    dives). Computed asynchronously by the debounced effect
                       //    above and stored in `chapterNoteHits`.
                       const noteResults = chapterNoteHits;
-                      const totalCount = recentResults.length + subjectResults.length + starResults.length + lucentResults.length + hwResults.length + noteResults.length;
-                      if (totalCount === 0) {
-                        if (chapterNoteHitsLoading) {
-                          return <p className="text-center text-xs text-slate-400 font-bold py-3">Searching inside chapter notes…</p>;
+                      const mcqResults = chapterMcqHits;
+                      const isSearching = chapterNoteHitsLoading || chapterMcqHitsLoading;
+                      // Group hwBookHits by book for per-book display sections
+                      const hwBooksGrouped: Record<string, { meta: typeof HW_BOOK_META[string]; hits: typeof hwBookHits }> = {};
+                      hwBookHits.forEach(hit => {
+                        const bk = hit.bookName || hit.subjectName;
+                        if (!hwBooksGrouped[bk]) {
+                          const bookId = Object.keys(HW_BOOK_META).find(k => HW_BOOK_META[k].label === bk) || bk;
+                          hwBooksGrouped[bk] = { meta: HW_BOOK_META[bookId] || { label: bk, emoji: '📖', color: 'bg-slate-100', border: 'border-slate-200', chip: 'bg-slate-100', chipText: 'text-slate-700' }, hits: [] };
                         }
-                        return <p className="text-center text-xs text-slate-400 font-bold py-3">No matches found. The search also looks inside notes — try a word that appears in your notes.</p>;
+                        hwBooksGrouped[bk].hits.push(hit);
+                      });
+                      const totalCount = recentResults.length + subjectResults.length + starResults.length + lucentResults.length + chapterNoteHits.length + mcqResults.length + hwBookHits.length;
+                      if (totalCount === 0) {
+                        if (isSearching) {
+                          return <p className="text-center text-xs text-slate-400 font-bold py-3">Notes aur MCQ mein dhundh raha hai…</p>;
+                        }
+                        return <p className="text-center text-xs text-slate-400 font-bold py-3">Kuch nahi mila. Notes ya MCQ mein jo word ho woh type karein.</p>;
                       }
                       return (
+                        <>
                         <div className="space-y-2.5 max-h-72 overflow-y-auto pr-0.5">
                           {subjectResults.length > 0 && (
                             <div className="space-y-1.5">
@@ -5216,33 +6449,157 @@ export const StudentDashboard: React.FC<Props> = ({
                               ))}
                             </div>
                           )}
-                          {noteResults.length > 0 && (
+                          {(() => {
+                            const schoolNoteHits = chapterNoteHits.filter(h => h.classLevel !== 'COMPETITION');
+                            const competitionNoteHits = chapterNoteHits.filter(h => h.classLevel === 'COMPETITION');
+                            return (
+                              <>
+                              {schoolNoteHits.length > 0 && (
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center justify-between px-1">
+                                    <p className="text-[10px] font-black uppercase tracking-wider text-violet-500 flex items-center gap-1">
+                                      Notes
+                                      <span className="text-[9px] font-bold text-slate-400">· Class 6-12</span>
+                                    </p>
+                                    {schoolNoteHits.length > 1 && compareMaxBooks !== 1 && (
+                                      <button
+                                        onClick={() => {
+                                          const limit = compareMaxBooks === 0 ? schoolNoteHits.length : compareMaxBooks;
+                                          const snapshot = schoolNoteHits.slice(0, limit);
+                                          const q = homeSearchQuery;
+                                          setCompareHits(snapshot);
+                                          setCompareQuery(q);
+                                          setShowCompareView(true);
+                                          setShowHomeSearch(false);
+                                          setHomeSearchQuery('');
+                                          const uBooks = new Set(snapshot.map((h: NoteSearchResult) => h.bookName || h.subjectName)).size;
+                                          saveCompareAnalytic(q, uBooks).catch(() => {});
+                                        }}
+                                        className="flex items-center gap-1 bg-violet-600 text-white px-2.5 py-1 rounded-lg text-[10px] font-black active:scale-95 transition-all shadow-sm"
+                                      >
+                                        {(() => { const limit = compareMaxBooks === 0 ? schoolNoteHits.length : compareMaxBooks; const snapshot = schoolNoteHits.slice(0, limit); const uBooks = new Set(snapshot.map((h: NoteSearchResult) => h.bookName || h.subjectName)).size; return `⚖️ Compare ${uBooks} Book${uBooks !== 1 ? 's' : ''}`; })()}
+                                      </button>
+                                    )}
+                                  </div>
+                                  {schoolNoteHits.map((h, i) => (
+                                    <button
+                                      key={`note_${h.storageKey}_${i}`}
+                                      onClick={() => {
+                                        openChapterFromNoteHit(h);
+                                        setShowHomeSearch(false);
+                                        setHomeSearchQuery('');
+                                      }}
+                                      className="w-full flex items-start gap-3 bg-white border border-violet-100 hover:border-violet-300 rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] shadow-sm"
+                                    >
+                                      <div className="w-8 h-8 rounded-lg bg-violet-100 text-violet-600 flex items-center justify-center shrink-0">
+                                        <BookOpen size={14} />
+                                      </div>
+                                      <div className="flex-1 min-w-0">
+                                        <p className="text-xs font-black text-slate-800 truncate">{h.noteTitle || h.subjectName}</p>
+                                        <p className="text-[10px] font-bold text-violet-500 truncate">
+                                          Class {h.classLevel} · {h.subjectName.replace(/-/g, ' ')} · {h.board}
+                                        </p>
+                                        <p className="text-[10px] text-slate-500 line-clamp-2 mt-0.5">{h.noteContent}</p>
+                                      </div>
+                                      <ChevronRight size={14} className="text-violet-400 shrink-0 mt-1" />
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              {competitionNoteHits.length > 0 && (
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center justify-between px-1">
+                                    <p className="text-[10px] font-black uppercase tracking-wider text-emerald-600 flex items-center gap-1">
+                                      Notes
+                                      <span className="text-[9px] font-bold text-slate-400">· Competition Books</span>
+                                    </p>
+                                    {competitionNoteHits.length > 1 && compareMaxBooks !== 1 && (
+                                      <button
+                                        onClick={() => {
+                                          const limit = compareMaxBooks === 0 ? competitionNoteHits.length : compareMaxBooks;
+                                          const snapshot = competitionNoteHits.slice(0, limit);
+                                          const q = homeSearchQuery;
+                                          setCompareHits(snapshot);
+                                          setCompareQuery(q);
+                                          setShowCompareView(true);
+                                          setShowHomeSearch(false);
+                                          setHomeSearchQuery('');
+                                          const uBooks = new Set(snapshot.map((h: NoteSearchResult) => h.bookName || h.subjectName)).size;
+                                          saveCompareAnalytic(q, uBooks).catch(() => {});
+                                        }}
+                                        className="flex items-center gap-1 bg-emerald-600 text-white px-2.5 py-1 rounded-lg text-[10px] font-black active:scale-95 transition-all shadow-sm"
+                                      >
+                                        {(() => { const limit = compareMaxBooks === 0 ? competitionNoteHits.length : compareMaxBooks; const snapshot = competitionNoteHits.slice(0, limit); const uBooks = new Set(snapshot.map((h: NoteSearchResult) => h.bookName || h.subjectName)).size; return `⚖️ Compare ${uBooks} Book${uBooks !== 1 ? 's' : ''}`; })()}
+                                      </button>
+                                    )}
+                                  </div>
+                                  {competitionNoteHits.map((h, i) => (
+                                    <button
+                                      key={`cnote_${h.storageKey}_${i}`}
+                                      onClick={() => {
+                                        openChapterFromNoteHit(h);
+                                        setShowHomeSearch(false);
+                                        setHomeSearchQuery('');
+                                      }}
+                                      className="w-full flex items-start gap-3 bg-white border border-emerald-100 hover:border-emerald-300 rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] shadow-sm"
+                                    >
+                                      <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
+                                        <BookOpen size={14} />
+                                      </div>
+                                      <div className="flex-1 min-w-0">
+                                        <p className="text-xs font-black text-slate-800 truncate">{h.noteTitle || h.subjectName}</p>
+                                        <p className="text-[10px] font-bold text-emerald-600 truncate">
+                                          {h.bookName || h.subjectName.replace(/-/g, ' ')} · Competition · {h.board}
+                                        </p>
+                                        <p className="text-[10px] text-slate-500 line-clamp-2 mt-0.5">{h.noteContent}</p>
+                                      </div>
+                                      <ChevronRight size={14} className="text-emerald-400 shrink-0 mt-1" />
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              </>
+                            );
+                          })()}
+                          {mcqResults.length > 0 && (
                             <div className="space-y-1.5">
-                              <p className="text-[10px] font-black uppercase tracking-wider text-violet-500 px-1 flex items-center gap-1">
-                                Inside Chapter Notes
-                                <span className="text-[9px] font-bold text-slate-400">· Class 6-12 + Competition</span>
-                              </p>
-                              {noteResults.map((h, i) => (
+                              <div className="flex items-center justify-between px-1">
+                                <p className="text-[10px] font-black uppercase tracking-wider text-orange-500 flex items-center gap-1">
+                                  MCQ
+                                  <span className="text-[9px] font-bold text-slate-400">· Class 6-12 + Competition</span>
+                                </p>
                                 <button
-                                  key={`note_${h.storageKey}_${i}`}
+                                  onClick={() => { setMcqSearchInitialQuery(homeSearchQuery); setShowMcqSearchView(true); setShowHomeSearch(false); setHomeSearchQuery(''); }}
+                                  className="flex items-center gap-1 bg-orange-600 text-white px-2.5 py-1 rounded-lg text-[10px] font-black active:scale-95 transition-all shadow-sm"
+                                >
+                                  🔍 Search All MCQs
+                                </button>
+                              </div>
+                              {mcqResults.map((h, i) => (
+                                <button
+                                  key={`mcq_${h.storageKey}_${i}`}
                                   onClick={() => {
-                                    openChapterFromNoteHit(h);
+                                    openChapterFromMcqHit(h);
                                     setShowHomeSearch(false);
                                     setHomeSearchQuery('');
                                   }}
-                                  className="w-full flex items-start gap-3 bg-white border border-violet-100 hover:border-violet-300 rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] shadow-sm"
+                                  className="w-full flex items-start gap-3 bg-white border border-orange-100 hover:border-orange-300 rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] shadow-sm"
                                 >
-                                  <div className="w-8 h-8 rounded-lg bg-violet-100 text-violet-600 flex items-center justify-center shrink-0">
-                                    <BookOpen size={14} />
+                                  <div className="w-8 h-8 rounded-lg bg-orange-100 text-orange-600 flex items-center justify-center shrink-0 font-black text-[11px]">
+                                    MCQ
                                   </div>
                                   <div className="flex-1 min-w-0">
-                                    <p className="text-xs font-black text-slate-800 truncate">{h.noteTitle || h.subjectName}</p>
-                                    <p className="text-[10px] font-bold text-violet-500 truncate">
-                                      Class {h.classLevel} · {h.subjectName.replace(/-/g, ' ')} · {h.board}
+                                    <p className="text-xs font-black text-slate-800 line-clamp-2">{h.question}</p>
+                                    <p className="text-[10px] font-bold text-orange-500 mt-0.5 truncate">
+                                      {h.classLevel === 'COMPETITION' ? 'Competition' : `Class ${h.classLevel}`} · {h.subjectName.replace(/-/g, ' ')} · {h.board}
                                     </p>
-                                    <p className="text-[10px] text-slate-500 line-clamp-2 mt-0.5">{h.noteContent}</p>
+                                    {h.options.length > 0 && (
+                                      <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                                        {h.options.slice(0, 2).map((o, oi) => `${String.fromCharCode(65+oi)}) ${o}`).join('  ')}
+                                      </p>
+                                    )}
                                   </div>
-                                  <ChevronRight size={14} className="text-violet-400 shrink-0 mt-1" />
+                                  <ChevronRight size={14} className="text-orange-400 shrink-0 mt-1" />
                                 </button>
                               ))}
                             </div>
@@ -5286,71 +6643,127 @@ export const StudentDashboard: React.FC<Props> = ({
                               ))}
                             </div>
                           )}
-                          {lucentResults.length > 0 && (
-                            <div className="space-y-1.5">
-                              <p className="text-[10px] font-black uppercase tracking-wider text-indigo-500 px-1">Lucent Notes (Page-wise)</p>
-                              {lucentResults.map((h, i) => (
-                                <button
-                                  key={`lh_${h.entry.id}_${h.pageIndex}_${i}`}
-                                  onClick={() => {
-                                    setLucentNoteViewer(h.entry);
-                                    setLucentPageIndex(h.pageIndex);
-                                    setPendingReadQuery(homeSearchQuery.trim());
-                                    setShowHomeSearch(false);
-                                    setHomeSearchQuery('');
-                                  }}
-                                  className="w-full flex items-start gap-3 bg-white border border-indigo-100 hover:border-indigo-300 rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] shadow-sm"
-                                >
-                                  <div className="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">
-                                    <BookOpen size={14} />
-                                  </div>
-                                  <div className="flex-1 min-w-0">
-                                    <p className="text-xs font-black text-slate-800 truncate">{h.entry.lessonTitle}</p>
-                                    <p className="text-[10px] font-bold text-indigo-500">Page {h.pageNo} · {h.entry.subject}</p>
-                                    <p className="text-[10px] text-slate-500 line-clamp-2 mt-0.5">…{h.snippet}…</p>
-                                  </div>
-                                </button>
-                              ))}
+                          {lucentBookGroups.map(({ bookName, hits }) => {
+                            const LUCENT_BOOK_COLORS: Record<string, { label: string; emoji: string; border: string; chipText: string; iconBg: string; iconText: string }> = {
+                              'Lucent':                { label: 'Lucent GK', emoji: '📘', border: 'border-indigo-100', chipText: 'text-indigo-600', iconBg: 'bg-indigo-100', iconText: 'text-indigo-600' },
+                              'Speedy Science':        { label: 'Speedy Science', emoji: '🔬', border: 'border-blue-100', chipText: 'text-blue-600', iconBg: 'bg-blue-100', iconText: 'text-blue-600' },
+                              'Speedy Social Science': { label: 'Speedy Social Sci', emoji: '🌏', border: 'border-orange-100', chipText: 'text-orange-600', iconBg: 'bg-orange-100', iconText: 'text-orange-600' },
+                              'Sar Sangrah':           { label: 'Sar Sangrah', emoji: '📕', border: 'border-rose-100', chipText: 'text-rose-600', iconBg: 'bg-rose-100', iconText: 'text-rose-600' },
+                            };
+                            const theme = LUCENT_BOOK_COLORS[bookName] || { label: bookName, emoji: '📗', border: 'border-emerald-100', chipText: 'text-emerald-600', iconBg: 'bg-emerald-100', iconText: 'text-emerald-600' };
+                            return (
+                              <div key={`lbk_${bookName}`} className="space-y-1.5">
+                                <p className={`text-[10px] font-black uppercase tracking-wider px-1 ${theme.chipText}`}>{theme.emoji} {theme.label} (Page-wise)</p>
+                                {hits.map((h, i) => (
+                                  <button
+                                    key={`lh_${h.entry.id}_${h.pageIndex}_${i}`}
+                                    onClick={() => {
+                                      setLucentNoteViewer(h.entry);
+                                      setLucentPageIndex(h.pageIndex);
+                                      setPendingReadQuery(homeSearchQuery.trim());
+                                      setShowHomeSearch(false);
+                                      setHomeSearchQuery('');
+                                    }}
+                                    className={`w-full flex items-start gap-3 bg-white border ${theme.border} hover:opacity-80 rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] shadow-sm`}
+                                  >
+                                    <div className={`w-8 h-8 rounded-lg ${theme.iconBg} ${theme.iconText} flex items-center justify-center shrink-0 text-base`}>
+                                      {theme.emoji}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-xs font-black text-slate-800 truncate">{h.entry.lessonTitle}</p>
+                                      <p className={`text-[10px] font-bold ${theme.chipText}`}>Page {h.pageNo} · {h.entry.subject}</p>
+                                      <p className="text-[10px] text-slate-500 line-clamp-2 mt-0.5">…{h.snippet}…</p>
+                                    </div>
+                                    <ChevronRight size={14} className="text-slate-300 shrink-0 mt-1" />
+                                  </button>
+                                ))}
+                              </div>
+                            );
+                          })}
+                          {/* Per-book sections: Sar Sangrah, Speedy Science, Speedy SST, custom books */}
+                          {Object.entries(hwBooksGrouped).map(([bookName, { meta, hits: bHits }]) => (
+                            <div key={`hwbook_${bookName}`} className="space-y-1.5">
+                              <p className="text-[10px] font-black uppercase tracking-wider px-1" style={{ color: 'inherit' }}>
+                                <span className={`${meta.chipText}`}>{meta.emoji} {meta.label}</span>
+                              </p>
+                              {bHits.slice(0, 6).map((h, i) => {
+                                // find the raw HomeworkItem to open
+                                const hwItem = (settings?.homework || []).find((hw: any) => hw.id === h.chapterId);
+                                return (
+                                  <button
+                                    key={`hwbk_${h.chapterId}_${i}`}
+                                    onClick={() => {
+                                      if (hwItem) {
+                                        openRecentHw({ id: hwItem.id, hw: hwItem, targetSubject: hwItem.targetSubject, title: hwItem.title } as any);
+                                        setPendingReadQuery(homeSearchQuery.trim());
+                                        setShowHomeSearch(false);
+                                        setHomeSearchQuery('');
+                                      }
+                                    }}
+                                    className={`w-full flex items-start gap-3 bg-white border ${meta.border} hover:opacity-80 rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] shadow-sm`}
+                                  >
+                                    <div className={`w-8 h-8 rounded-lg ${meta.color} flex items-center justify-center shrink-0 text-base`}>
+                                      {meta.emoji}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-xs font-black text-slate-800 truncate">{h.noteTitle}</p>
+                                      {h.pageNo && <p className={`text-[10px] font-bold ${meta.chipText}`}>Page {h.pageNo} · {meta.label}</p>}
+                                      <p className="text-[10px] text-slate-500 line-clamp-2 mt-0.5">…{h.noteContent}…</p>
+                                    </div>
+                                    <ChevronRight size={14} className="text-slate-300 shrink-0 mt-1" />
+                                  </button>
+                                );
+                              })}
                             </div>
-                          )}
-                          {hwResults.length > 0 && (
-                            <div className="space-y-1.5">
-                              <p className="text-[10px] font-black uppercase tracking-wider text-rose-500 px-1">Homework Notes</p>
-                              {hwResults.map((h, i) => (
-                                <button
-                                  key={`hwh_${h.hw.id || i}`}
-                                  onClick={() => {
-                                    const hw = h.hw;
-                                    const sub = hw.targetSubject || 'sarSangrah';
-                                    if (HOMEWORK_SUBJECTS.includes(sub)) {
-                                      setHomeworkSubjectView(sub);
-                                      setSelectedSubject({ id: sub, name: sub, icon: 'book', color: 'bg-rose-50 text-rose-600' } as any);
-                                      onTabChange('COURSES');
-                                    }
-                                    // Open the exact homework item directly + show its notes view
-                                    if (hw.id) {
-                                      setHwActiveHwId(hw.id);
-                                      setHwViewMode('notes');
-                                    }
-                                    setPendingReadQuery(homeSearchQuery.trim());
-                                    setShowHomeSearch(false);
-                                    setHomeSearchQuery('');
-                                  }}
-                                  className="w-full flex items-start gap-3 bg-white border border-rose-100 hover:border-rose-300 rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] shadow-sm"
-                                >
-                                  <div className="w-8 h-8 rounded-lg bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
-                                    <FileText size={14} />
-                                  </div>
-                                  <div className="flex-1 min-w-0">
-                                    <p className="text-xs font-black text-slate-800 truncate">{h.hw.title || 'Homework'}</p>
-                                    <p className="text-[10px] font-bold text-rose-500">{h.hw.targetSubject || 'homework'}{h.hw.date ? ` · ${new Date(h.hw.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}` : ''}</p>
-                                    <p className="text-[10px] text-slate-500 line-clamp-2 mt-0.5">…{h.snippet}…</p>
-                                  </div>
-                                </button>
-                              ))}
-                            </div>
-                          )}
+                          ))}
                         </div>
+
+
+                        {/* COMPARE SHORTCUTS at bottom of search results */}
+                        {homeSearchQuery.trim() && (() => {
+                          const contentHitsShortcut = [...noteResults, ...hwBookHits, ...lucentCompareHits];
+                          const seenSC = new Set<string>();
+                          const topicHitsShortcut: NoteSearchResult[] = [];
+                          [...contentHitsShortcut, ...titleBasedHits, ...chapterTitleHits].forEach(h => {
+                            if (!seenSC.has(h.storageKey)) { seenSC.add(h.storageKey); topicHitsShortcut.push(h); }
+                          });
+                          // Unique book counts — show books, not individual pages
+                          const uBooksShortcutContent = new Set(contentHitsShortcut.map(h => h.bookName || h.subjectName)).size;
+                          const uBooksShortcutTopic = new Set(topicHitsShortcut.map(h => h.bookName || h.subjectName)).size;
+                          if (topicHitsShortcut.length === 0) return null;
+                          return (
+                            <div className="mt-3 pt-3 border-t border-slate-100 flex flex-col gap-2">
+                              {uBooksShortcutContent >= 2 && (
+                                <button
+                                  onClick={() => setHomeSearchMode('compare')}
+                                  className="w-full flex items-center justify-center gap-2 bg-slate-100 text-slate-600 px-3 py-2 rounded-xl text-xs font-black active:scale-95 transition-all hover:bg-violet-50 hover:text-violet-700"
+                                >
+                                  <GitCompare size={14} />
+                                  ⚖️ Points se Compare — {uBooksShortcutContent} book{uBooksShortcutContent !== 1 ? 's' : ''} · Common &amp; Extra Points
+                                </button>
+                              )}
+                              {uBooksShortcutTopic >= 2 && (
+                                <button
+                                  onClick={() => {
+                                    const q = homeSearchQuery;
+                                    setCompareHits(topicHitsShortcut);
+                                    setCompareQuery(q);
+                                    setShowCompareView(true);
+                                    setShowHomeSearch(false);
+                                    setHomeSearchQuery('');
+                                    setHomeSearchMode('search');
+                                    saveCompareAnalytic(`topic:${q}`, uBooksShortcutTopic).catch(() => {});
+                                  }}
+                                  className="w-full flex items-center justify-center gap-2 bg-emerald-50 text-emerald-700 px-3 py-2 rounded-xl text-xs font-black active:scale-95 transition-all hover:bg-emerald-100 border border-emerald-200"
+                                >
+                                  <GitCompare size={14} />
+                                  📚 Topic se Compare — {uBooksShortcutTopic} book{uBooksShortcutTopic !== 1 ? 's' : ''} · Pure Notes
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })()}
+                        </>
                       );
                     })()}
                   </div>
@@ -5378,7 +6791,7 @@ export const StudentDashboard: React.FC<Props> = ({
                       return (
                         <button
                           key={opt.id}
-                          onClick={() => setContentTypePref(opt.id as any)}
+                          onClick={() => { hapticLight(); setContentTypePref(opt.id as any); }}
                           className={`flex flex-col items-center justify-center gap-0.5 py-2 rounded-xl text-[10px] font-bold transition-all ${
                             active
                               ? "bg-white text-blue-600 shadow-sm"
@@ -5467,10 +6880,44 @@ export const StudentDashboard: React.FC<Props> = ({
                     onTabChange("COURSES");
                   };
 
+                  const currentBoard = activeSessionBoard || user.board || "CBSE";
+
+                  const getClassStats = (classLevel: string) => {
+                    const getChapCount = (subs: any[]) => {
+                      let count = 0;
+                      subs.forEach(sub => {
+                        const key = `${currentBoard}-${classLevel}-${sub.name}`;
+                        let chapters = STATIC_SYLLABUS[key] || [];
+                        if (chapters.length === 0) {
+                          const defaultSub = Object.values(DEFAULT_SUBJECTS).find((s: any) => s.id === sub.id) as any;
+                          if (defaultSub) {
+                            chapters = STATIC_SYLLABUS[`${currentBoard}-${classLevel}-${defaultSub.name}`] || [];
+                          }
+                        }
+                        count += chapters.length;
+                      });
+                      return count;
+                    };
+
+                    if (classLevel === '11' || classLevel === '12') {
+                      const sciSubs = getSubjectsList(classLevel, 'Science', currentBoard);
+                      const comSubs = getSubjectsList(classLevel, 'Commerce', currentBoard);
+                      const artsSubs = getSubjectsList(classLevel, 'Arts', currentBoard);
+                      const allIds = new Set([...sciSubs, ...comSubs, ...artsSubs].map((s: any) => s.id));
+                      const subjectCount = allIds.size;
+                      const chapterCount = getChapCount(sciSubs);
+                      return { subjectCount, chapterCount };
+                    }
+
+                    const subjects = getSubjectsList(classLevel, null, currentBoard);
+                    return { subjectCount: subjects.length, chapterCount: getChapCount(subjects) };
+                  };
+
                   return (
                     <div className="space-y-4">
                       {groups.map((g) => {
                         const t = themes[g.key];
+                        const isTwoCol = g.classes.length === 2;
                         return (
                           <div key={g.key}>
                             <div className="flex items-center gap-2 mb-2">
@@ -5480,31 +6927,53 @@ export const StudentDashboard: React.FC<Props> = ({
                               </span>
                               <span className="flex-1 h-px bg-slate-100" />
                             </div>
-                            <div className={`grid ${g.classes.length === 2 ? "grid-cols-2" : "grid-cols-3"} gap-3`}>
+                            <div className={`grid ${isTwoCol ? "grid-cols-2" : "grid-cols-3"} gap-3`}>
                               {g.classes.map((c) => {
-                                const board = isBoardYear(c);
+                                const isBoard = isBoardYear(c);
+                                const { subjectCount } = getClassStats(c);
+                                const classIcon: Record<string, string> = { '6': '📖', '7': '🧪', '8': '🌍', '9': '📚', '10': '🏆', '11': '🚀', '12': '🎓' };
+                                const icon = classIcon[c] || '📘';
+                                const liveStats = classContentStats[`${currentBoard}_${c}`];
                                 return (
                                   <button
                                     key={c}
                                     onClick={() => { hapticStrong(); goToClass(c); }}
-                                    className={`group relative w-full py-5 px-3 min-h-[110px] rounded-2xl bg-white border-2 ${t.border} text-slate-700 font-black ${t.hoverBorder} hover:scale-[1.03] active:scale-[1.05] transition-all duration-150 text-center text-base flex flex-col items-center justify-center gap-1 overflow-hidden shadow-md hover:shadow-lg`}
+                                    className={`group relative w-full rounded-2xl bg-white border-2 ${c === '10' ? 'border-amber-400 shadow-[0_0_0_1px_rgba(251,191,36,0.3),0_4px_16px_rgba(0,0,0,0.08)]' : c === '12' ? 'border-purple-400 shadow-[0_0_0_1px_rgba(168,85,247,0.3),0_4px_16px_rgba(0,0,0,0.08)]' : t.border} text-left ${t.hoverBorder} hover:scale-[1.02] active:scale-[1.03] transition-all duration-150 overflow-hidden hover:shadow-md`}
                                   >
-                                    {/* Top accent bar — thicker & rounded */}
                                     <span className={`absolute top-0 left-0 right-0 h-[3px] bg-gradient-to-r ${t.accent} rounded-t-2xl`} />
-                                    {/* Subtle inner glow on hover */}
-                                    <span className={`absolute inset-0 opacity-0 group-hover:opacity-100 bg-gradient-to-br ${t.accent} opacity-5 transition-opacity`} style={{opacity: 0}} />
 
-                                    {/* Board year crown badge */}
-                                    {showBoardBadge(c) && (
-                                      <span className="absolute top-1.5 right-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200 text-[8px] font-black uppercase tracking-wider shadow-sm">
-                                        <Crown size={9} className="text-amber-600" />
+                                    {showBoardBadge(c) ? (
+                                      <span className="absolute top-2 right-2 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200 text-[7px] font-black uppercase tracking-wider shadow-sm">
+                                        <Crown size={8} className="text-amber-600" />
                                         Board
                                       </span>
+                                    ) : (
+                                      <span className="absolute top-2 right-2 text-base leading-none opacity-70">{icon}</span>
                                     )}
 
-                                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Class</span>
-                                    <span className={`text-3xl font-black leading-none ${board ? "text-amber-600" : t.text}`}>{c}</span>
-                                    <span className={`text-[9px] font-bold ${t.text} opacity-60`}>Tap to open</span>
+                                    <div className="px-3 pt-4 pb-3">
+                                      <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block">Class</span>
+                                      <div className="flex items-center gap-1.5">
+                                        <span className={`text-3xl font-black leading-none ${isBoard ? "text-amber-600" : t.text}`}>{c}</span>
+                                        {showBoardBadge(c) && <span className="text-lg leading-none opacity-60">{icon}</span>}
+                                      </div>
+
+                                      <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+                                        <span className={`text-[9px] font-bold ${t.text}`}>{subjectCount} Subjects</span>
+                                        {liveStats && liveStats.notes > 0 && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-indigo-600">📝{liveStats.notes}</span></>}
+                                        {liveStats && liveStats.pdf > 0   && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-rose-600">📄{liveStats.pdf}</span></>}
+                                        {liveStats && liveStats.mcq > 0   && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-amber-600">📊{liveStats.mcq}</span></>}
+                                        {liveStats && liveStats.video > 0 && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-green-600">🎥{liveStats.video}</span></>}
+                                        {liveStats && liveStats.audio > 0 && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-purple-600">🔊{liveStats.audio}</span></>}
+                                      </div>
+
+                                      <div className={`mt-2 flex items-center gap-0.5 ${t.text}`}>
+                                        <span className="text-[9px] font-bold opacity-70">Tap to open</span>
+                                        <span className="text-[9px] opacity-70">→</span>
+                                      </div>
+                                    </div>
+
+                                    <div className={`h-1 bg-gradient-to-r ${t.accent} opacity-30 group-hover:opacity-60 transition-opacity`} />
                                   </button>
                                 );
                               })}
@@ -5514,35 +6983,56 @@ export const StudentDashboard: React.FC<Props> = ({
                       })}
 
                       {/* GOVT EXAMS + AI SHORTCUT */}
-                      {isHomeSectionVisible('home_govt_exams', settings) && (
-                      <div>
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="inline-block h-2 w-2 rounded-full bg-gradient-to-r from-orange-500 to-amber-600" />
-                          <span className="text-[10px] font-black uppercase tracking-widest text-orange-700">
-                            Competitive • Govt. Exams
-                          </span>
-                          <span className="flex-1 h-px bg-slate-100" />
-                        </div>
-                        <div className="grid grid-cols-1 gap-3">
+                      {isHomeSectionVisible('home_govt_exams', settings) && (() => {
+                        const compSubjects = getSubjectsList('COMPETITION', null, currentBoard);
+                        const compSubjectCount = compSubjects.length;
+                        const compLive = classContentStats[`${currentBoard}_COMPETITION`];
+                        return (
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="inline-block h-2 w-2 rounded-full bg-gradient-to-r from-orange-500 to-amber-600" />
+                            <span className="text-[10px] font-black uppercase tracking-widest text-orange-700">
+                              Competitive • Govt. Exams
+                            </span>
+                            <span className="flex-1 h-px bg-slate-100" />
+                          </div>
                           <button
-                            onClick={() => goToClass("COMPETITION")}
-                            className="group relative w-full py-5 px-5 rounded-2xl bg-gradient-to-br from-orange-50 via-amber-50 to-yellow-50 border-2 border-orange-200 text-slate-700 font-black hover:border-orange-400 hover:from-orange-100 hover:via-amber-100 hover:to-yellow-100 active:scale-[0.97] transition-all text-left flex items-center gap-4 overflow-hidden shadow-md hover:shadow-lg"
+                            onClick={() => { hapticStrong(); goToClass("COMPETITION"); }}
+                            className="group relative w-full rounded-2xl bg-white border-2 border-orange-200 text-left hover:border-orange-400 hover:scale-[1.02] active:scale-[1.03] transition-all duration-150 overflow-hidden shadow-sm hover:shadow-md"
                           >
                             <span className="absolute top-0 left-0 right-0 h-[3px] bg-gradient-to-r from-orange-500 via-amber-500 to-yellow-500 rounded-t-2xl" />
-                            <span className="absolute -right-6 -bottom-6 w-24 h-24 bg-orange-100/60 rounded-full blur-2xl group-hover:bg-orange-200/60 transition-colors" />
-                            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-orange-400 to-amber-500 flex items-center justify-center shadow-lg shrink-0">
-                              <Trophy size={26} className="text-white drop-shadow" />
+                            <span className="absolute top-2 right-2 text-base leading-none opacity-70">🏆</span>
+
+                            <div className="px-3 pt-4 pb-3">
+                              <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block">Competitive Mode</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-2xl font-black leading-none text-orange-600">Govt.</span>
+                                <span className="text-2xl font-black leading-none text-amber-600">Exams</span>
+                              </div>
+
+                              <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+                                <span className="text-[9px] font-bold text-orange-700">{compSubjectCount} Books</span>
+                                {compLive && compLive.notes > 0 && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-indigo-600">📝{compLive.notes}</span></>}
+                                {compLive && compLive.pdf > 0   && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-rose-600">📄{compLive.pdf}</span></>}
+                                {compLive && compLive.mcq > 0   && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-amber-600">📊{compLive.mcq}</span></>}
+                                {compLive && compLive.video > 0 && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-green-600">🎥{compLive.video}</span></>}
+                                {compLive && compLive.audio > 0 && <><span className="text-[8px] text-slate-300">•</span><span className="text-[9px] font-bold text-purple-600">🔊{compLive.audio}</span></>}
+                                <span className="text-[8px] text-slate-300">•</span>
+                                <span className="text-[9px] text-slate-500">SSC · Railway · UPSC</span>
+                              </div>
+
+                              <div className="mt-2 flex items-center gap-0.5 text-orange-600">
+                                <span className="text-[9px] font-bold opacity-70">Tap to open</span>
+                                <span className="text-[9px] opacity-70">→</span>
+                              </div>
                             </div>
-                            <div className="flex-1 min-w-0 relative z-10">
-                              <span className="text-[9px] font-black uppercase tracking-widest text-orange-600 block">Competitive Mode</span>
-                              <span className="text-lg font-black text-slate-800 leading-tight block">Govt. Exams</span>
-                              <span className="text-[10px] text-slate-500 font-medium">SSC, Railway, UPSC, Bihar</span>
-                            </div>
-                            <ChevronRight size={20} className="text-orange-500 shrink-0 group-hover:translate-x-1 transition-transform" />
+
+                            <div className="h-1 bg-gradient-to-r from-orange-500 via-amber-500 to-yellow-500 opacity-30 group-hover:opacity-60 transition-opacity" />
                           </button>
                         </div>
-                      </div>
-                      )}
+                        );
+                      })()}
+
                     </div>
                   );
                 })()}
@@ -5694,16 +7184,22 @@ export const StudentDashboard: React.FC<Props> = ({
               board={activeSessionBoard as any}
               settings={settings}
               initialParentSubject={initialParentSubject}
+              contentIndex={classContentIndex[`${activeSessionBoard || user.board || 'CBSE'}_${activeSessionClass || '10'}`] || {}}
+              lucentNotes={(settings?.lucentNotes || []) as any[]}
               onSelect={(subject) => {
                 setSelectedSubject(subject);
                 setHomeworkSubjectView(null);
                 setLucentCategoryView(false);
                 if (HOMEWORK_SUBJECTS.includes(subject.id)) {
                   setHomeworkSubjectView(subject.id);
+                  setHwSubjectOpenedFrom('COURSES');
+                  setHwYear(null); setHwMonth(null); setHwWeek(null);
+                  _autoOpenFirstBookNote(subject.id);
                   return;
                 }
                 if (subject.id === 'lucent') {
                   setLucentCategoryView(true);
+                  setSelectedLucentBook(null);
                   return;
                 }
                 setContentViewStep("CHAPTERS");
@@ -5815,11 +7311,59 @@ export const StudentDashboard: React.FC<Props> = ({
     // if (activeTab === 'REWARDS') return (...); // REMOVED TO PREVENT CRASH
     if (activeTab === "STORE") {
       return (
-        <Store
-          user={user}
-          settings={settings}
-          onUserUpdate={handleUserUpdate}
-        />
+        <div className="animate-in fade-in duration-300">
+          {/* Store/Earn Sub-tabs */}
+          <div className="flex gap-2 px-4 pt-4 pb-2">
+            <button
+              onClick={() => setStoreSubTab('STORE')}
+              className={`flex-1 py-2.5 rounded-xl text-sm font-black transition-all ${storeSubTab === 'STORE' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+            >
+              🛒 Store
+            </button>
+            <button
+              onClick={() => setStoreSubTab('EARN')}
+              className={`flex-1 py-2.5 rounded-xl text-sm font-black transition-all ${storeSubTab === 'EARN' ? 'bg-amber-500 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+            >
+              🎰 Earn
+            </button>
+          </div>
+          {storeSubTab === 'STORE' && (
+            <Store
+              user={user}
+              settings={settings}
+              onUserUpdate={handleUserUpdate}
+            />
+          )}
+          {storeSubTab === 'EARN' && (
+            <div className="px-0 pb-6">
+              <div className="flex items-center gap-2 px-4 mb-3 mt-2">
+                <span className="inline-block h-2.5 w-2.5 rounded-full bg-gradient-to-r from-amber-400 to-orange-500" />
+                <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest">
+                  {(settings?.spinGameTypes?.length || 0) > 1 ? 'Earn Coins — Games' : 'Earn Coins — Spin the Wheel'}
+                </h3>
+              </div>
+              {isGameEnabled ? (
+                user.isGameBanned ? (
+                  <div className="mx-4 text-center py-10 bg-red-50 rounded-2xl border border-red-100">
+                    <Ban size={36} className="mx-auto text-red-500 mb-3" />
+                    <p className="text-sm font-bold text-red-700">Admin has disabled the game for your account.</p>
+                  </div>
+                ) : (
+                  <SpinWheel
+                    user={user}
+                    onUpdateUser={handleUserUpdate}
+                    settings={settings}
+                  />
+                )
+              ) : (
+                <div className="mx-4 text-center py-14 bg-slate-50 rounded-2xl border border-slate-100">
+                  <Gamepad2 size={36} className="mx-auto text-slate-400 mb-3" />
+                  <p className="text-sm font-bold text-slate-600">Game is currently disabled by admin.</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       );
     }
     if ((activeTab as any) === "TEACHER_STORE") {
@@ -5841,6 +7385,17 @@ export const StudentDashboard: React.FC<Props> = ({
         );
       }
       return <AppStore settings={settings} />;
+    }
+    if ((activeTab as string) === "THEME_BUILDER") {
+      return (
+        <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <ThemeAnimationBuilder
+            user={user}
+            onUpdateUser={handleUserUpdate}
+            onBack={() => onTabChange("HOME")}
+          />
+        </div>
+      );
     }
     if (activeTab === "PROFILE")
       return (
@@ -5864,9 +7419,64 @@ export const StudentDashboard: React.FC<Props> = ({
             )}
 
             {/* ANIMATED BACKGROUND FOR BASIC */}
-            {user.subscriptionLevel === "BASIC" && user.isPremium && (
+            {user.subscriptionLevel === "BASIC" && user.isPremium && (<>
               <div className="absolute inset-0 bg-gradient-to-tr from-white/10 to-transparent opacity-10"></div>
+              {/* White double shimmer */}
+              <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(105deg,transparent 30%,rgba(255,255,255,0.22) 50%,transparent 70%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep 2.5s linear infinite' }} />
+              <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(75deg,transparent 30%,rgba(255,255,255,0.12) 50%,transparent 70%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep-reverse 3.8s linear infinite' }} />
+              {/* Glow borders */}
+              <div className="absolute bottom-0 left-0 right-0 h-[2px] pointer-events-none" style={{ background: 'linear-gradient(90deg,transparent,rgba(255,255,255,0.7),rgba(147,197,253,0.9),rgba(255,255,255,0.7),transparent)', animation: 'topbar-glow-pulse 2s ease-in-out infinite' }} />
+              <div className="absolute top-0 left-0 right-0 h-[1px] pointer-events-none" style={{ background: 'linear-gradient(90deg,transparent,rgba(255,255,255,0.5),transparent)', animation: 'topbar-glow-pulse 2.5s ease-in-out infinite' }} />
+              {/* Sparkle dots */}
+              <div className="absolute top-3 left-[12%] w-1.5 h-1.5 rounded-full bg-white pointer-events-none" style={{ animation: 'sparkle-blink 2.1s ease-in-out infinite' }} />
+              <div className="absolute top-5 left-[38%] w-1 h-1 rounded-full bg-white pointer-events-none" style={{ animation: 'sparkle-blink 1.7s ease-in-out infinite 0.4s' }} />
+              <div className="absolute top-4 left-[62%] w-1.5 h-1.5 rounded-full bg-white pointer-events-none" style={{ animation: 'sparkle-blink 2.4s ease-in-out infinite 0.9s' }} />
+              <div className="absolute top-3 left-[85%] w-1 h-1 rounded-full bg-white pointer-events-none" style={{ animation: 'sparkle-blink 1.9s ease-in-out infinite 0.2s' }} />
+              <div className="absolute bottom-4 left-[25%] w-1 h-1 rounded-full bg-sky-300 pointer-events-none" style={{ animation: 'sparkle-blink 2.6s ease-in-out infinite 0.6s' }} />
+              <div className="absolute bottom-3 left-[72%] w-1.5 h-1.5 rounded-full bg-sky-200 pointer-events-none" style={{ animation: 'sparkle-blink 2s ease-in-out infinite 1.1s' }} />
+            </>)}
+
+            {/* ADMIN EFFECTS — same as top bar (both apply simultaneously) */}
+            {settings?.topBarEffects && settings.topBarEffects.length > 0 && (
+              <TopBarEffectsLayer effects={settings.topBarEffects} />
             )}
+            {/* USER CUSTOM EFFECT COLOR — gifted via redeem code */}
+            {user.topBarEffectColor && (
+              <TopBarEffectsLayer effects={[
+                { id: 'shimmer-forward', enabled: true, color: user.topBarEffectColor, speed: 1.5 },
+                { id: 'glow-both',       enabled: true, color: user.topBarEffectColor, speed: 1 },
+                { id: 'sparkle-full',    enabled: true, color: user.topBarEffectColor, speed: 1 },
+              ]} />
+            )}
+
+            {/* ANIMATED BACKGROUND FOR ULTRA — golden shimmer + sparkle on top of existing */}
+            {user.subscriptionLevel === "ULTRA" && user.isPremium && (<>
+              {/* Golden double shimmer */}
+              <div className="absolute inset-0 pointer-events-none z-[1]" style={{ background: 'linear-gradient(105deg,transparent 30%,rgba(168,85,247,0.16) 50%,transparent 70%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep 2.5s linear infinite' }} />
+              <div className="absolute inset-0 pointer-events-none z-[1]" style={{ background: 'linear-gradient(75deg,transparent 30%,rgba(236,72,153,0.10) 50%,transparent 70%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep-reverse 3.8s linear infinite' }} />
+              {/* Golden glow borders */}
+              <div className="absolute bottom-0 left-0 right-0 h-[2px] pointer-events-none z-[1]" style={{ background: 'linear-gradient(90deg,transparent,rgba(168,85,247,0.8),rgba(236,72,153,1),rgba(168,85,247,0.8),transparent)', animation: 'topbar-glow-pulse 2s ease-in-out infinite' }} />
+              <div className="absolute top-0 left-0 right-0 h-[1px] pointer-events-none z-[1]" style={{ background: 'linear-gradient(90deg,transparent,rgba(168,85,247,0.5),transparent)', animation: 'topbar-glow-pulse 2.5s ease-in-out infinite' }} />
+              {/* Golden sparkle dots */}
+              <div className="absolute top-3 left-[10%] w-1.5 h-1.5 rounded-full pointer-events-none z-[1]" style={{ background: '#c084fc', animation: 'sparkle-blink 2.1s ease-in-out infinite' }} />
+              <div className="absolute top-5 left-[35%] w-1 h-1 rounded-full pointer-events-none z-[1]" style={{ background: '#f472b6', animation: 'sparkle-blink 1.7s ease-in-out infinite 0.4s' }} />
+              <div className="absolute top-4 left-[60%] w-1.5 h-1.5 rounded-full pointer-events-none z-[1]" style={{ background: '#c084fc', animation: 'sparkle-blink 2.4s ease-in-out infinite 0.9s' }} />
+              <div className="absolute top-3 left-[82%] w-1 h-1 rounded-full pointer-events-none z-[1]" style={{ background: '#f472b6', animation: 'sparkle-blink 1.9s ease-in-out infinite 0.2s' }} />
+              <div className="absolute bottom-4 left-[22%] w-1 h-1 rounded-full pointer-events-none z-[1]" style={{ background: '#e879f9', animation: 'sparkle-blink 2.6s ease-in-out infinite 0.6s' }} />
+              <div className="absolute bottom-3 left-[70%] w-1.5 h-1.5 rounded-full pointer-events-none z-[1]" style={{ background: '#f9a8d4', animation: 'sparkle-blink 2s ease-in-out infinite 1.1s' }} />
+            </>)}
+
+            {/* FREE — subtle dark shimmer + sparkle */}
+            {!user.isPremium && (<>
+              <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(105deg,transparent 30%,rgba(0,0,0,0.08) 50%,transparent 70%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep 3s linear infinite' }} />
+              <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(75deg,transparent 30%,rgba(0,0,0,0.05) 50%,transparent 70%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep-reverse 4s linear infinite' }} />
+              <div className="absolute bottom-0 left-0 right-0 h-[2px] pointer-events-none" style={{ background: 'linear-gradient(90deg,transparent,rgba(148,163,184,0.5),rgba(203,213,225,0.7),rgba(148,163,184,0.5),transparent)', animation: 'topbar-glow-pulse 2s ease-in-out infinite' }} />
+              <div className="absolute top-0 left-0 right-0 h-[1px] pointer-events-none" style={{ background: 'linear-gradient(90deg,transparent,rgba(148,163,184,0.3),transparent)', animation: 'topbar-glow-pulse 2.5s ease-in-out infinite' }} />
+              <div className="absolute top-3 left-[15%] w-1 h-1 rounded-full pointer-events-none" style={{ background: 'rgba(148,163,184,0.6)', animation: 'sparkle-blink 2.1s ease-in-out infinite' }} />
+              <div className="absolute top-5 left-[40%] w-1 h-1 rounded-full pointer-events-none" style={{ background: 'rgba(148,163,184,0.6)', animation: 'sparkle-blink 1.7s ease-in-out infinite 0.4s' }} />
+              <div className="absolute top-4 left-[65%] w-1 h-1 rounded-full pointer-events-none" style={{ background: 'rgba(148,163,184,0.6)', animation: 'sparkle-blink 2.4s ease-in-out infinite 0.9s' }} />
+              <div className="absolute top-3 left-[85%] w-1 h-1 rounded-full pointer-events-none" style={{ background: 'rgba(148,163,184,0.6)', animation: 'sparkle-blink 1.9s ease-in-out infinite 0.2s' }} />
+            </>)}
 
             {/* SPECIAL BANNER ANIMATION (7/30/365) */}
             {(user.subscriptionTier === "WEEKLY" ||
@@ -5984,7 +7594,7 @@ export const StudentDashboard: React.FC<Props> = ({
                       else if (tier === "MONTHLY") displayTier = "Monthly";
                       else if (tier === "YEARLY") displayTier = "Yearly";
                       else if (tier === "LIFETIME")
-                        displayTier = "Yearly Plus"; // Mapped as per user request
+                        displayTier = "Yearly Plus";
                       else if (tier === "3_MONTHLY") displayTier = "Quarterly";
                       else if (tier === "CUSTOM") displayTier = "Custom Plan";
 
@@ -5997,6 +7607,44 @@ export const StudentDashboard: React.FC<Props> = ({
                   : "Free User"}
               </span>
             </div>
+
+            {/* STREAK BADGE — glowing, shows on profile */}
+            {user.streak > 0 && (() => {
+              const s = user.streak;
+              const badgeColor = s >= 30 ? { bg: 'rgba(239,68,68,0.18)', border: 'rgba(239,68,68,0.5)', text: '#f87171', glow: 'rgba(239,68,68,0.5)' }
+                               : s >= 14 ? { bg: 'rgba(249,115,22,0.18)', border: 'rgba(249,115,22,0.5)', text: '#fb923c', glow: 'rgba(249,115,22,0.5)' }
+                               : s >= 7  ? { bg: 'rgba(245,158,11,0.18)', border: 'rgba(245,158,11,0.5)', text: '#fbbf24', glow: 'rgba(245,158,11,0.5)' }
+                               : s >= 3  ? { bg: 'rgba(251,191,36,0.12)', border: 'rgba(251,191,36,0.4)', text: '#fcd34d', glow: 'rgba(251,191,36,0.3)' }
+                               :           { bg: 'rgba(251,191,36,0.08)', border: 'rgba(251,191,36,0.25)', text: '#fde68a', glow: 'rgba(251,191,36,0.2)' };
+              const fireSize = s >= 30 ? '1.5rem' : s >= 14 ? '1.3rem' : s >= 7 ? '1.1rem' : '1rem';
+              const label = s >= 30 ? 'Legend' : s >= 14 ? 'Pro' : s >= 7 ? 'On Fire' : s >= 3 ? 'Streak' : 'Streak';
+              return (
+                <div className="mt-3 relative z-10 flex justify-center">
+                  <div
+                    className="relative inline-flex items-center gap-2 px-5 py-2 rounded-full"
+                    style={{
+                      background: badgeColor.bg,
+                      border: `1.5px solid ${badgeColor.border}`,
+                      boxShadow: `0 0 16px ${badgeColor.glow}, 0 0 32px ${badgeColor.glow}55`,
+                      animation: 'topbar-glow-pulse 2s ease-in-out infinite',
+                    }}
+                  >
+                    {/* Shimmer */}
+                    <div className="absolute inset-0 rounded-full pointer-events-none overflow-hidden">
+                      <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(105deg,transparent 30%,rgba(255,255,255,0.15) 50%,transparent 70%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep 2.5s linear infinite' }} />
+                    </div>
+                    <span style={{ fontSize: fireSize, filter: `drop-shadow(0 0 6px ${badgeColor.glow})`, animation: 'sparkle-blink 1.8s ease-in-out infinite' }}>🔥</span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-xl font-black leading-none" style={{ color: badgeColor.text, textShadow: `0 0 10px ${badgeColor.glow}` }}>{s}</span>
+                      <span className="text-[10px] font-black uppercase tracking-widest" style={{ color: badgeColor.text, opacity: 0.7 }}>Day {label}</span>
+                    </div>
+                    {(user.longestStreak || 0) === s && s > 1 && (
+                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full ml-1" style={{ background: 'rgba(255,255,255,0.15)', color: badgeColor.text }}>BEST 🏆</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           <div className="space-y-3 mt-4">
@@ -6027,6 +7675,69 @@ export const StudentDashboard: React.FC<Props> = ({
                   )}
               </div>
             </div>
+
+            {/* DAILY USAGE CARD */}
+            {(() => {
+              const isUltra = user.isPremium && user.subscriptionLevel === 'ULTRA';
+              const isBasic = user.isPremium && user.subscriptionLevel === 'BASIC';
+              const todayStr = new Date().toISOString().split('T')[0];
+              const mcqToday = parseInt(localStorage.getItem(`nst_mcq_daily_total_${todayStr}_${user.id}`) || '0', 10);
+              const storeVisits = parseInt(localStorage.getItem(`nst_store_visits_${user.id}_${todayStr}`) || '0', 10);
+              const htmlSessions = parseInt(localStorage.getItem(`nst_basic_html_${user.id}_${todayStr}`) || '0', 10);
+              const tierLabel = isUltra ? 'Ultra ⚡' : isBasic ? 'Basic 🔵' : 'Free 🆓';
+              const tierColor = isUltra ? 'from-violet-500 to-purple-600' : isBasic ? 'from-sky-500 to-blue-600' : 'from-slate-400 to-slate-500';
+              return (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                  <div className="px-4 pt-3 pb-2 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base">📊</span>
+                      <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Daily Usage</p>
+                    </div>
+                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-full text-white bg-gradient-to-r ${tierColor}`}>{tierLabel}</span>
+                  </div>
+                  <div className="divide-y divide-slate-100">
+                    <div className="px-4 py-2.5 flex items-center gap-3">
+                      <span className="text-base shrink-0">📝</span>
+                      <p className="flex-1 text-[11px] font-bold text-slate-600">MCQ Practiced</p>
+                      <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">{mcqToday} done</span>
+                    </div>
+                    <div className="px-4 py-2.5 flex items-center gap-3">
+                      <span className="text-base shrink-0">✍️</span>
+                      <p className="flex-1 text-[11px] font-bold text-slate-600">Write Mode</p>
+                      <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
+                        {isUltra ? '∞ Free' : isBasic ? `${htmlSessions} used` : `${settings?.htmlUnlockCost ?? 5} CR/session`}
+                      </span>
+                    </div>
+                    <div className="px-4 py-2.5 flex items-center gap-3">
+                      <span className="text-base shrink-0">🏬</span>
+                      <p className="flex-1 text-[11px] font-bold text-slate-600">Store Visits</p>
+                      <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">{storeVisits} today</span>
+                    </div>
+                    <div className="px-4 py-2.5 flex items-center gap-3">
+                      <span className="text-base shrink-0">💰</span>
+                      <p className="flex-1 text-[11px] font-bold text-slate-600">Credits Balance</p>
+                      <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${(user.credits||0)>=20?'bg-emerald-100 text-emerald-700':(user.credits||0)>0?'bg-amber-100 text-amber-700':'bg-rose-100 text-rose-600'}`}>{user.credits||0} CR</span>
+                    </div>
+                  </div>
+                  <div className="px-4 py-3 flex gap-2">
+                    <button
+                      onClick={() => setShowFeatureLimitsModal(true)}
+                      className="flex-1 py-2 rounded-xl bg-gradient-to-r from-slate-100 to-slate-200 text-slate-600 text-[10px] font-black active:scale-95 transition border border-slate-200"
+                    >
+                      🔑 View All Limits
+                    </button>
+                    {!isUltra && (
+                      <button
+                        onClick={() => onTabChange('STORE')}
+                        className="flex-1 py-2 rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white text-[10px] font-black active:scale-95 transition"
+                      >
+                        ⚡ Upgrade
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* ACTION LIST */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden divide-y divide-slate-100">
@@ -6386,37 +8097,7 @@ export const StudentDashboard: React.FC<Props> = ({
                   </div>
                 </button>
 
-                {/* ROTATE SCREEN */}
-                <button
-                  onClick={async () => {
-                    rotateFullscreenRef.current = true;
-                    const result = await rotateScreen();
-                    rotateFullscreenRef.current = false;
-                    if (result === null) {
-                      showAlert(tApp(appLang, 'rotate_unsupported'), 'WARNING');
-                    }
-                  }}
-                  className={`w-full p-4 rounded-xl border shadow-sm flex items-center gap-3 transition-all ${cardBg}`}
-                >
-                  <div className={`p-2 rounded-lg ${isDarkMode ? 'bg-violet-500/20 text-violet-300' : 'bg-violet-100 text-violet-600'}`}>
-                    <RotateCcw size={18} />
-                  </div>
-                  <div className="flex-1 text-left min-w-0">
-                    <div className={`text-sm font-bold ${sheetTextStrong}`}>{tApp(appLang, 'rotate_screen')}</div>
-                    <div className={`text-[11px] font-medium ${sheetTextMuted}`}>{tApp(appLang, 'rotate_screen_hint')}</div>
-                  </div>
-                  <ChevronRight size={16} className={sheetTextMuted} />
-                </button>
 
-                {/* SETUP RECOVERY */}
-                <button
-                  onClick={() => { setShowSidebar(false); setShowRecoveryModal(true); setShowSettingsSheet(false); }}
-                  className={`w-full p-4 rounded-xl border shadow-sm flex items-center gap-3 transition-all ${isDarkMode ? 'bg-orange-900/20 border-orange-900/40' : 'bg-white border-orange-100 hover:bg-orange-50'}`}
-                >
-                  <div className={`p-2 rounded-lg ${isDarkMode ? 'bg-orange-500/20 text-orange-300' : 'bg-orange-100 text-orange-600'}`}><Lock size={18} /></div>
-                  <span className={`text-sm font-bold flex-1 text-left ${sheetTextStrong}`}>{tApp(appLang, 'setup_recovery')}</span>
-                  <ChevronRight size={16} className={sheetTextMuted} />
-                </button>
 
                 <button onClick={() => setShowSettingsSheet(false)} className={`w-full mt-2 text-sm font-bold py-3 ${sheetTextMuted}`}>
                   {tApp(appLang, 'close')}
@@ -6629,16 +8310,59 @@ export const StudentDashboard: React.FC<Props> = ({
       {/* NEW GLOBAL TOP BAR */}
       <div
         id="top-banner-container"
-        className={`sticky top-0 z-[100] w-full shadow-md flex flex-col justify-between px-4 py-3 transition-all duration-300 ${
+        className={`relative sticky top-0 z-[100] w-full shadow-md flex flex-col justify-between px-4 py-2 transition-all duration-300 ${
           user.isPremium
             ? user.subscriptionLevel === "ULTRA"
-              ? "bg-slate-900 text-white"
+              ? "bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white border-b border-slate-700"
               : user.subscriptionLevel === "BASIC"
-                ? "bg-gradient-to-r from-sky-500 to-cyan-600 text-white"
+                ? "bg-gradient-to-r from-blue-700 via-indigo-700 to-blue-800 text-white"
                 : "bg-[var(--primary)] text-white"
-            : "bg-gradient-to-r from-slate-600 to-slate-800 text-white grayscale border-b border-slate-700"
-        } ${isFullscreenMode ? "hidden" : ""} transition-all duration-300 ease-in-out ${isTopBarHidden ? "-translate-y-full !h-0 overflow-hidden opacity-0 pointer-events-none" : "translate-y-0 opacity-100"}`}
+            : "bg-gradient-to-r from-sky-500 to-cyan-600 text-white"
+        } ${isFullscreenMode ? "hidden" : ""} transition-all duration-300 ease-in-out ${(isTopBarHidden || isLandscapeUiHidden) ? "-translate-y-full !h-0 overflow-hidden opacity-0 pointer-events-none" : "translate-y-0 opacity-100"}`}
       >
+        {/* Animation effects — wrapped in overflow-hidden so shimmer/sparkle stays clipped to top bar */}
+        <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
+          {/* User custom effect color (gifted via redeem code) — always rendered on top */}
+          {user.topBarEffectColor && (
+            <TopBarEffectsLayer effects={[
+              { id: 'shimmer-forward', enabled: true, color: user.topBarEffectColor, speed: 1.5 },
+              { id: 'glow-bottom',     enabled: true, color: user.topBarEffectColor, speed: 1 },
+              { id: 'sparkle-top',     enabled: true, color: user.topBarEffectColor, speed: 1 },
+            ]} />
+          )}
+          {/* Admin-configured top bar effects (if set), else tier defaults */}
+          {settings?.topBarEffects && settings.topBarEffects.length > 0 ? (
+            <TopBarEffectsLayer effects={settings.topBarEffects} />
+          ) : (<>
+            {/* ULTRA default — golden */}
+            {user.isPremium && user.subscriptionLevel === 'ULTRA' && (
+              <TopBarEffectsLayer effects={[
+                { id: 'shimmer-forward', enabled: true, color: '#fbbf24' },
+                { id: 'shimmer-reverse', enabled: true, color: '#fbbf24' },
+                { id: 'glow-both',       enabled: true, color: '#fbbf24' },
+                { id: 'sparkle-full',    enabled: true, color: '#fcd34d' },
+              ]} />
+            )}
+            {/* BASIC default — white */}
+            {user.isPremium && user.subscriptionLevel === 'BASIC' && (
+              <TopBarEffectsLayer effects={[
+                { id: 'shimmer-forward', enabled: true, color: '#ffffff' },
+                { id: 'shimmer-reverse', enabled: true, color: '#ffffff' },
+                { id: 'glow-both',       enabled: true, color: '#93c5fd' },
+                { id: 'sparkle-full',    enabled: true, color: '#ffffff' },
+              ]} />
+            )}
+            {/* FREE default — subtle dark */}
+            {!user.isPremium && (
+              <TopBarEffectsLayer effects={[
+                { id: 'shimmer-forward', enabled: true, color: '#000000' },
+                { id: 'shimmer-reverse', enabled: true, color: '#000000' },
+                { id: 'glow-bottom',     enabled: true, color: '#bae6fd' },
+                { id: 'sparkle-top',     enabled: true, color: '#ffffff' },
+              ]} />
+            )}
+          </>)}
+        </div>
         {/* Main Header Row */}
         <div className="flex items-center justify-between w-full relative">
           <div
@@ -6669,279 +8393,820 @@ export const StudentDashboard: React.FC<Props> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar justify-end pl-2 z-10 ml-auto">
-            {/* Universal Video — admin-toggled top-bar shortcut. Only visible
-                when admin moved Universal Video out of the bottom nav. */}
-            {settings?.universalVideoInTopBar && (
-              <button
-                onClick={() => { onTabChange("UNIVERSAL_VIDEO"); setCurrentLogicalTab("VIDEO"); }}
-                className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/20 hover:bg-white/30 text-white shrink-0 active:scale-95 transition"
-                title="Universal Video"
-              >
-                <Video size={14} />
-                <span className="text-[10px] font-bold uppercase">Video</span>
-              </button>
-            )}
-            {/* Streak Badge — tap to see details */}
-            {!(settings?.hiddenTopBarButtons || []).includes('STREAK') && (
-            <button
-              onClick={() => setShowStreakPopup(v => !v)}
-              className={`flex items-center gap-1 px-2 py-1 rounded-full shadow-sm text-xs font-black border backdrop-blur-sm whitespace-nowrap shrink-0 active:scale-95 transition-all ${
-                readingStreak.readToday
-                  ? 'bg-orange-500/30 text-orange-50 border-orange-300/50 animate-pulse-slow'
-                  : readingStreak.current > 0
-                    ? 'bg-orange-500/15 text-orange-100 border-orange-400/30'
-                    : 'bg-white/15 text-white/80 border-white/25'
-              }`}
-              title={`Reading streak: ${readingStreak.current} day${readingStreak.current === 1 ? '' : 's'}`}
-            >
-              <span className={readingStreak.current >= 7 ? 'text-base' : ''}>
-                {readingStreak.readToday ? '🔥' : readingStreak.current > 0 ? '🔥' : '💤'}
-              </span>
-              <span>{readingStreak.current}</span>
-              {readingStreak.current >= 7 && <span className="text-[9px] ml-0.5">DAY</span>}
-            </button>
-            )}
+          {/* RIGHT SIDE: Fixed action icons + Credits (no scroll) */}
+          <div className="flex items-center gap-1 flex-1 min-w-0 ml-1 z-10 justify-end">
 
-            {/* Credits */}
-            {!(settings?.hiddenTopBarButtons || []).includes('CREDITS') && (
-            <button
-              onClick={() => onTabChange("STORE")}
-              className="keep-light-badge flex items-center gap-1 px-2 py-1 rounded-full shadow-sm text-xs font-black hover:scale-105 transition-transform bg-[#FDFBF7] text-slate-800 border border-amber-100 whitespace-nowrap shrink-0"
-            >
-              <Crown size={14} className="fill-slate-800" /> {user.credits} CR
-            </button>
-            )}
-
-            {/* Custom Page / Lightning */}
-            {!(settings?.hiddenTopBarButtons || []).includes('LIGHTNING') && (
-            <button
-              onClick={() => onTabChange("CUSTOM_PAGE")}
-              className="keep-light-badge p-1.5 rounded-full transition-colors relative bg-[#FDFBF7] hover:bg-slate-50 text-slate-800 border border-amber-100 shrink-0"
-            >
-              <Zap size={16} />
-              {hasNewUpdate && (
-                <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse"></span>
+              {/* Search icon — opens home search from top bar */}
+              {isHomeSectionVisible('home_search_button', settings) && (
+                <button
+                  onClick={() => { setShowHomeSearch(s => !s); setHomeSearchQuery(''); if (activeTab !== 'HOME') onTabChange('HOME'); }}
+                  className={`keep-light-badge p-1.5 rounded-full transition-all shrink-0 border active:scale-95 ${showHomeSearch ? 'bg-blue-600 text-white border-blue-500 shadow-md' : 'bg-[#FDFBF7] text-slate-800 border-amber-100 hover:bg-blue-50'}`}
+                  title="Search"
+                >
+                  <Search size={15} />
+                </button>
               )}
-            </button>
-            )}
 
-            {/* Notification Bell */}
-            {!(settings?.hiddenTopBarButtons || []).includes('NOTIFICATION') && allNotifications.length > 0 && (
+              {/* Lightning ⚡ — removed from top bar, accessible via 3-dot menu */}
+
+              {/* Mail / Inbox button — notifications + messages + gifts */}
               <button
-                onClick={() => setShowNotifPage(true)}
+                onClick={() => {
+                  setInboxTab(unreadNotifCount > 0 && unreadCount === 0 ? 'UPDATES' : 'MESSAGES');
+                  setShowInbox(true);
+                }}
                 className="keep-light-badge p-1.5 rounded-full transition-colors relative bg-[#FDFBF7] hover:bg-slate-50 text-slate-800 border border-amber-100 shrink-0"
-                title="Notifications"
+                title="Mail & Notifications"
               >
-                <Bell size={16} />
-                {unreadNotifCount > 0 && (
+                <Mail size={16} />
+                {(unreadCount + unreadNotifCount + _newContentCount) > 0 && (
                   <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-0.5 bg-red-500 rounded-full text-[9px] text-white font-black flex items-center justify-center animate-bounce">
-                    {unreadNotifCount > 9 ? '9+' : unreadNotifCount}
+                    {(unreadCount + unreadNotifCount + _newContentCount) > 9 ? '9+' : (unreadCount + unreadNotifCount + _newContentCount)}
                   </span>
                 )}
               </button>
-            )}
 
-            {/* Sale Discount Mini Button —
-                LIVE  → "% OFF" pill (active discount)
-                COOL  → "COMING SOON" pill (cooldown phase, prices normal) */}
-            {!(settings?.hiddenTopBarButtons || []).includes('SALE') && settings?.specialDiscountEvent?.enabled && (isDiscountLive || isDiscountCooldown) && (
-              <button
-                onClick={() => onTabChange("STORE")}
-                className={`keep-light-badge p-1.5 rounded-full transition-colors relative shrink-0 flex items-center gap-1 ${
-                  isDiscountLive
-                    ? 'bg-[#FDFBF7] hover:bg-slate-50 text-slate-800 border border-amber-100'
-                    : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300'
-                }`}
-                title={isDiscountLive ? 'Sale is LIVE' : 'Sale Coming Soon'}
-              >
-                <Ticket size={16} />
-                <span className="text-[10px] font-bold whitespace-nowrap">
-                  {isDiscountLive
-                    ? (settings?.specialDiscountEvent?.discountPercent
-                        ? `${settings.specialDiscountEvent.discountPercent}% OFF`
-                        : "50% OFF")
-                    : "COMING SOON"}
-                </span>
-              </button>
-            )}
+
+              {/* 3-DOT MENU BUTTON — in first line, after Mail */}
+              <div className="relative shrink-0">
+                <button
+                  onClick={() => setShowDotsMenu(v => !v)}
+                  className="keep-light-badge p-1.5 rounded-full transition-all border bg-[#FDFBF7] text-slate-800 border-amber-100 hover:bg-blue-50 active:scale-95"
+                  title="More options"
+                >
+                  <MoreVertical size={15} />
+                </button>
+                {showDotsMenu && (
+                  <>
+                    {/* Backdrop — tap anywhere outside to close */}
+                    <div
+                      className="fixed inset-0 z-[9998] bg-black/30 backdrop-blur-[2px] animate-in fade-in duration-150"
+                      onClick={() => setShowDotsMenu(false)}
+                      onTouchStart={() => setShowDotsMenu(false)}
+                    />
+                    {/* Dropdown panel */}
+                    <div className="fixed top-[56px] right-2 w-64 bg-white rounded-2xl shadow-2xl border border-slate-100 z-[9999] animate-in fade-in zoom-in-95 duration-150 overflow-hidden max-h-[calc(100dvh-70px)] overflow-y-auto">
+                      {/* Close button row */}
+                      <div className="flex items-center justify-between px-4 pt-3 pb-1">
+                        <span className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Menu</span>
+                        <button
+                          onClick={() => setShowDotsMenu(false)}
+                          className="p-1 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+                        </button>
+                      </div>
+                      {/* Board switch */}
+                      <div className="px-4 pt-3 pb-2 border-b border-slate-100">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Board</p>
+                        <div className="flex items-center bg-slate-100 p-0.5 rounded-xl">
+                          <button
+                            onClick={() => { setActiveSessionBoard("CBSE"); }}
+                            className={`flex-1 py-1.5 text-xs font-black rounded-lg transition-all ${activeSessionBoard !== "BSEB" ? "bg-blue-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                          >CBSE</button>
+                          <button
+                            onClick={() => { setActiveSessionBoard("BSEB"); }}
+                            className={`flex-1 py-1.5 text-xs font-black rounded-lg transition-all ${activeSessionBoard === "BSEB" ? "bg-blue-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                          >BSEB</button>
+                        </div>
+                      </div>
+
+                      {/* Quick Actions */}
+                      <div className="px-4 pt-3 pb-3 border-b border-slate-100">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Quick Access</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => { onTabChange("UNIVERSAL_VIDEO"); setCurrentLogicalTab("VIDEO"); setShowDotsMenu(false); }}
+                            className="flex items-center gap-2 p-2 rounded-xl bg-blue-50 text-blue-700 font-bold text-xs hover:bg-blue-100 transition-all"
+                          >
+                            <Video size={14} /> Video
+                          </button>
+                          <button
+                            onClick={async () => {
+                              setShowDotsMenu(false);
+                              rotateFullscreenRef.current = true;
+                              const result = await rotateScreen();
+                              rotateFullscreenRef.current = false;
+                              if (result === null) showAlert('Screen rotation is not supported on this device/browser.', 'WARNING');
+                            }}
+                            className={`flex items-center gap-2 p-2 rounded-xl font-bold text-xs transition-all ${isLandscape ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
+                          >
+                            <RotateCcw size={14} /> Rotate
+                          </button>
+                          <button
+                            onClick={() => { onTabChange("CUSTOM_PAGE"); setShowDotsMenu(false); }}
+                            className="flex items-center gap-2 p-2 rounded-xl bg-teal-50 text-teal-700 font-bold text-xs hover:bg-teal-100 transition-all relative"
+                          >
+                            <Zap size={14} /> What's New
+                            {hasNewUpdate && <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full animate-pulse" />}
+                          </button>
+                          <button
+                            onClick={() => { switchToLogicalTab("PROFILE"); setShowDotsMenu(false); }}
+                            className="flex items-center gap-2 p-2 rounded-xl bg-slate-100 text-slate-700 font-bold text-xs hover:bg-slate-200 transition-all"
+                          >
+                            <UserIcon size={14} /> Profile
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Subscription Info */}
+                      <div className="px-4 pt-3 pb-2 border-b border-slate-100">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Subscription</p>
+                        <div className="bg-slate-50 rounded-xl p-3 flex items-center justify-between">
+                          <div>
+                            <p className="text-xs font-black text-slate-700">{user.subscriptionTier || 'Free Plan'}</p>
+                            {user.subscriptionEndDate && user.isPremium && (
+                              <p className="text-[10px] text-slate-500 mt-0.5">
+                                Expires: {new Date(user.subscriptionEndDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => { onTabChange("STORE"); setShowDotsMenu(false); }}
+                            className="text-[10px] font-black bg-gradient-to-r from-indigo-500 to-purple-500 text-white px-3 py-1.5 rounded-full"
+                          >
+                            {user.isPremium ? 'Renew' : 'Upgrade'}
+                          </button>
+                        </div>
+                      </div>
+                      {/* Daily Downloads remaining pill */}
+                      <div className="px-4 pt-2 pb-1">
+                        <div className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-[10px] font-bold text-slate-600 border border-slate-100">
+                          <span>📥 HTML Downloads today</span>
+                          <span className={`font-black ${_dlHtmlLeft === 0 ? 'text-rose-600' : _dlHtmlLeft <= 2 ? 'text-amber-600' : 'text-emerald-600'}`}>
+                            {_dlHtmlLeft}/{_dlHtmlLimit} left
+                          </span>
+                        </div>
+                      </div>
+                      {/* Feature Limits & Daily Usage */}
+                      <div className="px-4 pt-1 pb-1">
+                        <button
+                          onClick={() => { setShowFeatureLimitsModal(true); setShowDotsMenu(false); }}
+                          className="w-full flex items-center gap-2 p-2.5 rounded-xl bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 text-emerald-700 hover:from-emerald-100 hover:to-teal-100 font-bold text-xs transition-all"
+                        >
+                          <span className="text-base">📊</span>
+                          <span className="flex-1 text-left">Daily Limits & Usage</span>
+                          <span className="text-[10px] text-emerald-400">→</span>
+                        </button>
+                      </div>
+                      {/* Rules Page Link */}
+                      <div className="px-4 pt-1 pb-1">
+                        <button
+                          onClick={() => { setShowRulesPage(true); setShowDotsMenu(false); }}
+                          className="w-full flex items-center gap-2 p-2.5 rounded-xl bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 text-violet-700 hover:from-violet-100 hover:to-indigo-100 font-bold text-xs transition-all"
+                        >
+                          <span className="text-base">📋</span>
+                          <span className="flex-1 text-left">Feature Rules — Free / Basic / Ultra</span>
+                          <span className="text-[10px] text-violet-400">→</span>
+                        </button>
+                      </div>
+                      {/* Login History */}
+                      <div className="px-4 pt-1 pb-4">
+                        <button
+                          onClick={() => { setShowLoginHistory(true); setShowDotsMenu(false); }}
+                          className="w-full flex items-center gap-2 p-2.5 rounded-xl bg-gradient-to-r from-blue-50 to-sky-50 border border-blue-200 text-blue-700 hover:from-blue-100 hover:to-sky-100 font-bold text-xs transition-all"
+                        >
+                          <span className="text-base">🕐</span>
+                          <span className="flex-1 text-left">Login History</span>
+                          <span className="text-[10px] text-blue-400">→</span>
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
           </div>
         </div>
 
-        {/* SECOND LINE: Subscription, Expiry Date */}
-        <div className="flex items-center justify-between w-full mt-2 pt-1 border-t border-white/10">
-          <div className="flex items-center gap-2 opacity-90 shrink-0">
-            <span className="text-sm font-bold text-white/90 truncate">
+        {/* SECOND LINE: Streak + Credits + greeting + subscription badge */}
+        <div className="flex items-center justify-between w-full mt-0.5 pt-0.5 border-t border-white/10">
+          {/* Left: Streak + greeting */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[12px] font-bold text-white/90 truncate max-w-[90px]">
               Hey, {(user.name || "Student").split(" ")[0]} 👋
             </span>
           </div>
-          <div className="flex items-center gap-2 opacity-90 shrink-0">
-            <span className="text-[10px] font-bold uppercase tracking-widest text-white">
-              {user.isPremium ? user.subscriptionTier || "PREMIUM" : "FREE"}
-            </span>
-            {user.isPremium &&
-              user.subscriptionEndDate &&
-              user.subscriptionTier !== "LIFETIME" &&
-              !isNaN(new Date(user.subscriptionEndDate).getTime()) && (
-                <span className="text-[10px] font-bold text-white uppercase tracking-widest bg-black/20 px-1.5 py-0.5 rounded-sm">
-                  EXP:{" "}
-                  {new Date(user.subscriptionEndDate)
-                    .toLocaleDateString("en-GB", {
-                      day: "numeric",
-                      month: "short",
-                      year: "2-digit",
-                    })
-                    .replace(/ /g, " ")
-                    .toUpperCase()}
-                </span>
-              )}
+
+          {/* Right: Streak + Credits + subscription badge + expiry */}
+          <div className="flex items-center gap-1.5 shrink-0 max-w-[70%] overflow-hidden">
+            {/* Streak 🔥 */}
+            <button
+              onClick={() => { setShowStreakPopup(v => !v); setStreakHistoryView(false); }}
+              className={`relative overflow-hidden inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full shadow-sm text-[8px] font-black border backdrop-blur-sm whitespace-nowrap shrink-0 active:scale-95 transition-all w-[72px] justify-center ${
+                user.streak > 0
+                  ? 'bg-amber-500/25 text-amber-50 border-amber-400/50'
+                  : 'bg-white/15 text-white/80 border-white/25'
+              }`}
+              title={`Login streak: ${user.streak} day${user.streak === 1 ? '' : 's'}`}
+            >
+              <div className="absolute inset-0 pointer-events-none rounded-full" style={{ boxShadow: user.streak > 0 ? 'inset 0 0 0 1px rgba(251,191,36,0.6)' : 'inset 0 0 0 1px rgba(251,191,36,0.2)', animation: 'topbar-glow-pulse 2s ease-in-out infinite' }} />
+              <span className="relative z-10 text-[12px] leading-none">🔥</span>
+              <span className="relative z-10">{user.streak}</span>
+            </button>
+            {/* Credits button */}
+            {!(settings?.hiddenTopBarButtons || []).includes('CREDITS') && (
+              <div className="shrink-0 w-[72px]">
+                {((settings?.specialDiscountEvent?.enabled && isDiscountCooldown) ? topBarCreditFlip : false) ? (
+                  <button
+                    onClick={() => onTabChange("STORE")}
+                    className={`keep-light-badge banner-premium-shimmer inline-flex items-center justify-center gap-1 w-full h-5 px-1 rounded-full shadow-sm text-[7px] font-black hover:scale-105 transition-all duration-500 ease-out whitespace-nowrap shrink-0 border animate-in fade-in zoom-in ${
+                      user.subscriptionLevel === 'ULTRA' && user.isPremium
+                        ? 'bg-gradient-to-r from-sky-500/25 to-cyan-400/15 text-white border-sky-300/40 shadow-[0_0_12px_rgba(56,189,248,0.25)]'
+                        : user.subscriptionLevel === 'BASIC' && user.isPremium
+                          ? 'bg-gradient-to-r from-sky-500/20 to-cyan-400/10 text-white border-sky-300/35 shadow-[0_0_10px_rgba(56,189,248,0.18)]'
+                          : 'bg-white/15 text-white border-white/25'
+                    }`}
+                    title="Cooldown Timer"
+                  >
+                    <Timer size={11} className="text-white" />
+                    <span>{cooldownTimeLeft ? `${String(cooldownTimeLeft.hours).padStart(2, '0')}:${String(cooldownTimeLeft.minutes).padStart(2, '0')}:${String(cooldownTimeLeft.seconds).padStart(2, '0')}` : '00:00:00'}</span>
+                  </button>
+                ) : ((settings?.specialDiscountEvent?.enabled && isDiscountLive) ? topBarCreditFlip : false) ? (
+                  <button
+                    onClick={() => onTabChange("STORE")}
+                    className={`keep-light-badge banner-premium-shimmer inline-flex items-center justify-center gap-1 w-full h-5 px-1 rounded-full shadow-sm text-[7px] font-black hover:scale-105 transition-all duration-500 ease-out whitespace-nowrap shrink-0 border animate-in fade-in zoom-in ${
+                      user.subscriptionLevel === 'ULTRA' && user.isPremium
+                        ? 'bg-gradient-to-r from-sky-500/25 to-cyan-400/15 text-white border-sky-300/40 shadow-[0_0_12px_rgba(56,189,248,0.25)]'
+                        : user.subscriptionLevel === 'BASIC' && user.isPremium
+                          ? 'bg-gradient-to-r from-sky-500/20 to-cyan-400/10 text-white border-sky-300/35 shadow-[0_0_10px_rgba(56,189,248,0.18)]'
+                          : 'bg-white/15 text-white border-white/25'
+                    }`}
+                    title="Discount"
+                  >
+                    <Ticket size={11} className="text-white" />
+                    <span>{Number(settings?.specialDiscountEvent?.discountPercent ?? 20)}% OFF</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => onTabChange("STORE")}
+                    className={`keep-light-badge banner-premium-shimmer inline-flex items-center justify-center gap-1 w-full h-5 px-1 rounded-full shadow-sm text-[7px] font-black hover:scale-105 transition-all duration-500 ease-out whitespace-nowrap shrink-0 border animate-in fade-in zoom-in ${
+                      user.subscriptionLevel === 'ULTRA' && user.isPremium
+                        ? 'bg-gradient-to-r from-sky-500/25 to-cyan-400/15 text-white border-sky-300/40 shadow-[0_0_12px_rgba(56,189,248,0.25)]'
+                        : user.subscriptionLevel === 'BASIC' && user.isPremium
+                          ? 'bg-gradient-to-r from-sky-500/20 to-cyan-400/10 text-white border-sky-300/35 shadow-[0_0_10px_rgba(56,189,248,0.18)]'
+                          : 'bg-white/15 text-white border-white/25'
+                    }`}
+                    title="Credits"
+                  >
+                    <Crown size={11} className="text-white" />
+                    <span>{user.credits} CR</span>
+                  </button>
+                )}
+              </div>
+            )}
+            {/* Subscription badge */}
+            {user.isPremium && (
+              <span className="w-[72px] text-center text-[7px] font-black py-0.5 rounded-full bg-white/20 text-white border border-white/30 whitespace-nowrap shrink-0">
+                {user.subscriptionLevel === 'ULTRA' ? '👑 ULTRA' : user.subscriptionLevel === 'BASIC' ? '⭐ BASIC' : 'PRO'}
+              </span>
+            )}
           </div>
         </div>
       </div>
 
-      {/* STREAK DETAIL POPUP (anchored under top bar) */}
+      {/* LIFETIME POPUP — enhanced with white shimmer */}
+      {showLifetimePopup && !isFullscreenMode && (() => {
+        const quotes = [
+          { text: "A lifetime of learning is a life truly lived.", author: "IIC Wisdom" },
+          { text: "You don't need deadlines — you have forever to grow.", author: "IIC Wisdom" },
+          { text: "Unlimited access, unlimited potential. That's you.", author: "IIC Wisdom" },
+          { text: "Learning never exhausts the mind.", author: "Leonardo da Vinci" },
+          { text: "Education is not preparation for life; it is life itself.", author: "John Dewey" },
+          { text: "Stars don't expire. Neither does your membership.", author: "IIC Wisdom" },
+          { text: "The best investment you can ever make is in your own mind.", author: "Warren Buffett" },
+          { text: "An investment in knowledge pays the best interest.", author: "Benjamin Franklin" },
+          { text: "Great minds are built one lesson at a time.", author: "IIC Wisdom" },
+          { text: "You chose forever. That says everything about you.", author: "IIC Wisdom" },
+        ];
+        const q = quotes[lifetimeQuoteIdx % quotes.length];
+        return (
+          <div className="fixed inset-0 z-[9999] flex items-end justify-center pb-6 px-4" style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)' }} onClick={() => setShowLifetimePopup(false)}>
+            <div className="relative w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl" style={{ background: 'linear-gradient(160deg,#0d0d1a 0%,#1a0e2e 40%,#0f1a3d 100%)', border: '1px solid rgba(251,191,36,0.3)' }} onClick={e => e.stopPropagation()}>
+
+              {/* Golden shimmer sweep overlay */}
+              <div className="absolute inset-0 pointer-events-none z-10" style={{ background: 'linear-gradient(105deg,transparent 35%,rgba(251,191,36,0.18) 50%,transparent 65%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep 2.5s linear infinite' }} />
+
+              {/* Animated gold top strip */}
+              <div className="h-1.5 w-full" style={{ background: 'linear-gradient(90deg,#f59e0b,#fcd34d,#f59e0b,#fde68a,#f59e0b)', backgroundSize: '300% 100%', animation: 'shimmer-sweep 2s linear infinite' }} />
+
+              {/* Star particles */}
+              <div className="absolute top-6 left-4 text-amber-300/20 text-xs select-none pointer-events-none">✦ ✦ ✦</div>
+              <div className="absolute top-8 right-5 text-amber-300/15 text-[10px] select-none pointer-events-none">★ ✦ ★</div>
+
+              <div className="relative z-20 px-6 pt-6 pb-5 flex flex-col items-center gap-4">
+
+                {/* Icon ring */}
+                <div className="relative">
+                  <div className="w-20 h-20 rounded-full flex items-center justify-center text-3xl" style={{ background: 'radial-gradient(circle,rgba(251,191,36,0.25) 0%,rgba(251,191,36,0.05) 70%)', border: '2px solid rgba(251,191,36,0.45)', boxShadow: '0 0 28px rgba(251,191,36,0.25),inset 0 0 16px rgba(251,191,36,0.1)' }}>♾</div>
+                  <div className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-amber-400 flex items-center justify-center text-xs shadow-lg">👑</div>
+                </div>
+
+                {/* Title */}
+                <div className="text-center">
+                  <p className="text-[10px] font-black uppercase tracking-[0.25em] text-amber-400/60 mb-1">Your Membership</p>
+                  <h2 className="text-3xl font-black tracking-widest" style={{ background: 'linear-gradient(135deg,#fcd34d,#f59e0b,#fde68a)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>LIFETIME</h2>
+                  <div className="flex items-center justify-center gap-2 mt-1.5">
+                    <div className="h-px w-8 bg-amber-400/30" />
+                    <p className="text-[10px] text-white/40 uppercase tracking-widest">No Expiry · Forever Access</p>
+                    <div className="h-px w-8 bg-amber-400/30" />
+                  </div>
+                </div>
+
+                {/* Member name card */}
+                <div className="w-full px-4 py-2.5 rounded-xl text-center" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.15)' }}>
+                  <p className="text-[10px] text-amber-300/50 uppercase tracking-widest mb-0.5">Member</p>
+                  <p className="text-sm font-black text-white">{user.name || 'Student'}</p>
+                </div>
+
+                {/* Quote card */}
+                <div className="w-full rounded-2xl px-4 py-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                  <p className="text-[10px] text-amber-300/40 uppercase tracking-widest text-center mb-3">✦ Daily Wisdom ✦</p>
+                  <p className="text-sm font-semibold text-white/90 leading-relaxed italic text-center">"{q.text}"</p>
+                  <p className="text-[10px] text-amber-300/50 text-center mt-2 font-bold">— {q.author}</p>
+                </div>
+
+                {/* Dots */}
+                <div className="flex items-center gap-1.5">
+                  {quotes.map((_, i) => (
+                    <div key={i} className={`rounded-full transition-all ${i === lifetimeQuoteIdx % quotes.length ? 'w-4 h-1.5 bg-amber-400' : 'w-1.5 h-1.5 bg-white/20'}`} />
+                  ))}
+                </div>
+
+                {/* Buttons */}
+                <div className="w-full flex gap-2 mt-1">
+                  <button onClick={() => setLifetimeQuoteIdx(p => (p + 1) % quotes.length)} className="flex-1 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider text-amber-200 hover:scale-105 transition-transform" style={{ background: 'rgba(251,191,36,0.15)', border: '1px solid rgba(251,191,36,0.3)' }}>Next Quote ✦</button>
+                  <button onClick={() => setShowLifetimePopup(false)} className="flex-1 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider text-white/60 hover:scale-105 transition-transform" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}>Close</button>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ULTRA / BASIC / FREE POPUP */}
+      {showPremiumPopup && !isFullscreenMode && (() => {
+        const tier = user.isPremium ? (user.subscriptionLevel || user.subscriptionTier || 'PREMIUM') : 'FREE';
+        const isUltra = tier === 'ULTRA';
+        const isBasic = tier === 'BASIC';
+
+        const ultraQuotes = [
+          { text: "Excellence is not a destination; it's a continuous journey.", author: "IIC Wisdom" },
+          { text: "Ultra minds think big, learn deep, and rise above.", author: "IIC Wisdom" },
+          { text: "You didn't settle for average. That's why you're here.", author: "IIC Wisdom" },
+          { text: "The secret of getting ahead is getting started.", author: "Mark Twain" },
+          { text: "Push yourself, because no one else is going to do it for you.", author: "IIC Wisdom" },
+          { text: "Success is the sum of small efforts, repeated daily.", author: "Robert Collier" },
+          { text: "Dream big. Study hard. Make it happen.", author: "IIC Wisdom" },
+          { text: "The harder you work, the luckier you get.", author: "Gary Player" },
+          { text: "Champions keep going when they don't feel like it.", author: "IIC Wisdom" },
+          { text: "Ultra access. Ultra effort. Ultra results.", author: "IIC Wisdom" },
+        ];
+        const basicQuotes = [
+          { text: "Every expert was once a beginner.", author: "Helen Hayes" },
+          { text: "Small steps every day lead to big results.", author: "IIC Wisdom" },
+          { text: "Start where you are. Use what you have. Do what you can.", author: "Arthur Ashe" },
+          { text: "Consistency beats intensity every single time.", author: "IIC Wisdom" },
+          { text: "Believe you can and you're halfway there.", author: "Theodore Roosevelt" },
+          { text: "Don't watch the clock; do what it does. Keep going.", author: "Sam Levenson" },
+          { text: "Progress, not perfection, is the goal.", author: "IIC Wisdom" },
+          { text: "Your future self will thank you for studying today.", author: "IIC Wisdom" },
+          { text: "The only bad workout is the one that didn't happen.", author: "IIC Wisdom" },
+          { text: "You are one lesson away from a breakthrough.", author: "IIC Wisdom" },
+        ];
+        const freeQuotes = [
+          { text: "Every journey begins with a single step.", author: "Lao Tzu" },
+          { text: "Free access, infinite possibilities.", author: "IIC Wisdom" },
+          { text: "Knowledge is free. The effort to get it is priceless.", author: "IIC Wisdom" },
+          { text: "Start small. Think big. Keep learning.", author: "IIC Wisdom" },
+          { text: "The more you learn, the more you earn.", author: "Warren Buffett" },
+          { text: "Education is the most powerful weapon.", author: "Nelson Mandela" },
+          { text: "Today a reader, tomorrow a leader.", author: "Margaret Fuller" },
+          { text: "Curiosity is the engine of achievement.", author: "Ken Robinson" },
+          { text: "The capacity to learn is a gift. Use it.", author: "IIC Wisdom" },
+          { text: "Great things start with great learning.", author: "IIC Wisdom" },
+        ];
+
+        const quotes = isUltra ? ultraQuotes : isBasic ? basicQuotes : freeQuotes;
+        const q = quotes[premiumQuoteIdx % quotes.length];
+
+        const colors = isUltra ? {
+          grad: 'linear-gradient(160deg,#0d0920,#1a0e38,#0d1a30)',
+          outerBorder: 'rgba(167,139,250,0.3)',
+          strip: 'linear-gradient(90deg,#7c3aed,#a78bfa,#7c3aed,#c4b5fd,#7c3aed)',
+          icon: '⚡', iconBg: 'rgba(124,58,237,0.25)', iconBgOuter: 'rgba(124,58,237,0.05)',
+          iconBorder: 'rgba(167,139,250,0.5)', iconGlow: '0 0 28px rgba(167,139,250,0.3),inset 0 0 16px rgba(167,139,250,0.1)',
+          badgePip: '#7c3aed', pipIcon: '⚡',
+          titleGrad: 'linear-gradient(135deg,#c4b5fd,#a78bfa,#ede9fe)',
+          labelColor: 'rgba(196,181,253,0.6)', dividerColor: 'rgba(167,139,250,0.3)',
+          subtitle: 'Ultra Access · Full Power',
+          nameBg: 'rgba(124,58,237,0.12)', nameBorder: 'rgba(167,139,250,0.2)', nameLabel: 'rgba(196,181,253,0.5)',
+          cardBorder: '1px solid rgba(167,139,250,0.15)',
+          quoteLabel: 'rgba(196,181,253,0.4)', quoteMeta: 'rgba(196,181,253,0.6)',
+          dotColor: '#a78bfa', particleColor: 'rgba(196,181,253,0.2)',
+          nextBtn: 'rgba(124,58,237,0.2)', nextBtnBorder: 'rgba(167,139,250,0.4)', nextBtnColor: '#c4b5fd',
+        } : isBasic ? {
+          grad: 'linear-gradient(160deg,#050d1a,#0d1e38,#091428)',
+          outerBorder: 'rgba(96,165,250,0.3)',
+          strip: 'linear-gradient(90deg,#2563eb,#60a5fa,#2563eb,#93c5fd,#2563eb)',
+          icon: '🎓', iconBg: 'rgba(37,99,235,0.25)', iconBgOuter: 'rgba(37,99,235,0.05)',
+          iconBorder: 'rgba(96,165,250,0.5)', iconGlow: '0 0 28px rgba(96,165,250,0.25),inset 0 0 16px rgba(96,165,250,0.1)',
+          badgePip: '#2563eb', pipIcon: '🎓',
+          titleGrad: 'linear-gradient(135deg,#93c5fd,#60a5fa,#dbeafe)',
+          labelColor: 'rgba(147,197,253,0.6)', dividerColor: 'rgba(96,165,250,0.3)',
+          subtitle: 'Basic Plan · Keep Growing',
+          nameBg: 'rgba(37,99,235,0.12)', nameBorder: 'rgba(96,165,250,0.2)', nameLabel: 'rgba(147,197,253,0.5)',
+          cardBorder: '1px solid rgba(96,165,250,0.15)',
+          quoteLabel: 'rgba(147,197,253,0.4)', quoteMeta: 'rgba(147,197,253,0.6)',
+          dotColor: '#60a5fa', particleColor: 'rgba(147,197,253,0.2)',
+          nextBtn: 'rgba(37,99,235,0.2)', nextBtnBorder: 'rgba(96,165,250,0.4)', nextBtnColor: '#93c5fd',
+        } : {
+          grad: 'linear-gradient(160deg,#0a0a0a,#141414,#0a0f1a)',
+          outerBorder: 'rgba(148,163,184,0.2)',
+          strip: 'linear-gradient(90deg,#475569,#94a3b8,#475569,#cbd5e1,#475569)',
+          icon: '🌱', iconBg: 'rgba(71,85,105,0.25)', iconBgOuter: 'rgba(71,85,105,0.05)',
+          iconBorder: 'rgba(148,163,184,0.4)', iconGlow: '0 0 16px rgba(148,163,184,0.15)',
+          badgePip: '#475569', pipIcon: '🌱',
+          titleGrad: 'linear-gradient(135deg,#cbd5e1,#94a3b8,#e2e8f0)',
+          labelColor: 'rgba(203,213,225,0.5)', dividerColor: 'rgba(148,163,184,0.25)',
+          subtitle: 'Free Plan · Start Learning',
+          nameBg: 'rgba(71,85,105,0.15)', nameBorder: 'rgba(148,163,184,0.2)', nameLabel: 'rgba(203,213,225,0.4)',
+          cardBorder: '1px solid rgba(148,163,184,0.12)',
+          quoteLabel: 'rgba(203,213,225,0.35)', quoteMeta: 'rgba(203,213,225,0.5)',
+          dotColor: '#94a3b8', particleColor: 'rgba(203,213,225,0.15)',
+          nextBtn: 'rgba(71,85,105,0.25)', nextBtnBorder: 'rgba(148,163,184,0.3)', nextBtnColor: '#cbd5e1',
+        };
+
+        return (
+          <div className="fixed inset-0 z-[9999] flex items-end justify-center pb-6 px-4" style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)' }} onClick={() => setShowPremiumPopup(false)}>
+            <div className="relative w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl" style={{ background: colors.grad, border: `1px solid ${colors.outerBorder}` }} onClick={e => e.stopPropagation()}>
+
+              {/* White shimmer sweep — ULTRA only */}
+              {isUltra && (
+                <div className="absolute inset-0 pointer-events-none z-10" style={{ background: 'linear-gradient(105deg,transparent 35%,rgba(255,255,255,0.12) 50%,transparent 65%)', backgroundSize: '200% 100%', animation: 'shimmer-sweep 2.5s linear infinite' }} />
+              )}
+
+              {/* Animated colour top strip */}
+              <div className="h-1.5 w-full" style={{ background: colors.strip, backgroundSize: '300% 100%', animation: 'shimmer-sweep 2s linear infinite' }} />
+
+              {/* Particle decoration */}
+              <div className="absolute top-6 left-4 select-none pointer-events-none text-xs" style={{ color: colors.particleColor }}>✦ ✦ ✦</div>
+              <div className="absolute top-8 right-5 select-none pointer-events-none text-[10px]" style={{ color: colors.particleColor }}>★ ✦ ★</div>
+
+              <div className="relative z-20 px-6 pt-6 pb-5 flex flex-col items-center gap-4">
+
+                {/* Icon ring with crown badge */}
+                <div className="relative">
+                  <div className="w-20 h-20 rounded-full flex items-center justify-center text-3xl" style={{ background: `radial-gradient(circle,${colors.iconBg} 0%,${colors.iconBgOuter} 70%)`, border: `2px solid ${colors.iconBorder}`, boxShadow: colors.iconGlow }}>
+                    {colors.icon}
+                  </div>
+                  <div className="absolute -top-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center text-xs shadow-lg" style={{ background: colors.badgePip }}>{colors.pipIcon}</div>
+                </div>
+
+                {/* Title */}
+                <div className="text-center">
+                  <p className="text-[10px] font-black uppercase tracking-[0.25em] mb-1" style={{ color: colors.labelColor }}>Your Membership</p>
+                  <h2 className="text-3xl font-black tracking-widest" style={{ background: colors.titleGrad, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{tier}</h2>
+                  <div className="flex items-center justify-center gap-2 mt-1.5">
+                    <div className="h-px w-8" style={{ background: colors.dividerColor }} />
+                    <p className="text-[10px] text-white/40 uppercase tracking-widest">{colors.subtitle}</p>
+                    <div className="h-px w-8" style={{ background: colors.dividerColor }} />
+                  </div>
+                </div>
+
+                {/* Member name card */}
+                <div className="w-full px-4 py-2.5 rounded-xl text-center" style={{ background: colors.nameBg, border: `1px solid ${colors.nameBorder}` }}>
+                  <p className="text-[10px] uppercase tracking-widest mb-0.5" style={{ color: colors.nameLabel }}>Member</p>
+                  <p className="text-sm font-black text-white">{user.name || 'Student'}</p>
+                </div>
+
+                {/* Quote card */}
+                <div className="w-full rounded-2xl px-4 py-4" style={{ background: 'rgba(255,255,255,0.04)', border: colors.cardBorder }}>
+                  <p className="text-[10px] uppercase tracking-widest text-center mb-3" style={{ color: colors.quoteLabel }}>✦ Daily Wisdom ✦</p>
+                  <p className="text-sm font-semibold text-white/90 leading-relaxed italic text-center">"{q.text}"</p>
+                  <p className="text-[10px] text-center mt-2 font-bold" style={{ color: colors.quoteMeta }}>— {q.author}</p>
+                </div>
+
+                {/* Dots */}
+                <div className="flex items-center gap-1.5">
+                  {quotes.map((_, i) => (
+                    <div key={i} className={`rounded-full transition-all ${i === premiumQuoteIdx % quotes.length ? 'w-4 h-1.5' : 'w-1.5 h-1.5 bg-white/20'}`} style={i === premiumQuoteIdx % quotes.length ? { background: colors.dotColor } : {}} />
+                  ))}
+                </div>
+
+                {/* Buttons */}
+                <div className="w-full flex gap-2 mt-1">
+                  <button onClick={() => setPremiumQuoteIdx(p => (p + 1) % quotes.length)} className="flex-1 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider hover:scale-105 transition-transform" style={{ background: colors.nextBtn, border: `1px solid ${colors.nextBtnBorder}`, color: colors.nextBtnColor }}>Next Quote ✦</button>
+                  <button onClick={() => setShowPremiumPopup(false)} className="flex-1 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider text-white/50 hover:scale-105 transition-transform" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}>Close</button>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* STREAK DETAIL POPUP — full bottom-sheet modal */}
       {showStreakPopup && !isFullscreenMode && !isTopBarHidden && (() => {
-        const dates = getReadDates().slice(0, 14);
-        const bestDay = getBestReadingDay();
-        const todayCount = getTodayItemCount();
-        const fmt = (s: string) => {
-          try {
-            return new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-          } catch { return s; }
+        // ── helpers ──────────────────────────────────────────────
+        const fmtHours = (sec: number) => {
+          const h = Math.floor(sec / 3600);
+          const m = Math.floor((sec % 3600) / 60);
+          if (h === 0 && m === 0) return '0m';
+          if (h === 0) return `${m}m`;
+          if (m === 0) return `${h}h`;
+          return `${h}h ${m}m`;
         };
-        const fmtFull = (s: string) => {
-          try {
-            return new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-          } catch { return s; }
-        };
-        const todayStr = (() => {
-          const d = new Date();
-          const y = d.getFullYear();
-          const m = String(d.getMonth() + 1).padStart(2, '0');
-          const day = String(d.getDate()).padStart(2, '0');
-          return `${y}-${m}-${day}`;
-        })();
-        // Build last-7-days indicator
-        const last7: { dateStr: string; label: string; read: boolean }[] = [];
-        const dateSet = new Set(getReadDates());
-        for (let i = 6; i >= 0; i--) {
+
+        // ── 10-day study history from localStorage ───────────────
+        const last10: { label: string; dayLabel: string; seconds: number; isToday: boolean }[] = [];
+        for (let i = 9; i >= 0; i--) {
           const d = new Date();
           d.setHours(0, 0, 0, 0);
           d.setDate(d.getDate() - i);
-          const y = d.getFullYear();
-          const m = String(d.getMonth() + 1).padStart(2, '0');
-          const day = String(d.getDate()).padStart(2, '0');
-          const ds = `${y}-${m}-${day}`;
-          last7.push({
-            dateStr: ds,
-            label: ['S','M','T','W','T','F','S'][d.getDay()],
-            read: dateSet.has(ds),
+          const key = `activity_${user.id}_${d.toDateString()}`;
+          const seconds = parseInt(localStorage.getItem(key) || '0');
+          const shortLabels = ['S','M','T','W','T','F','S'];
+          last10.push({
+            label: i === 0 ? 'Today' : shortLabels[d.getDay()],
+            dayLabel: shortLabels[d.getDay()],
+            seconds,
+            isToday: i === 0,
           });
         }
+        const maxSec = Math.max(...last10.map(d => d.seconds), 1);
+        const totalSec10d = last10.reduce((s, d) => s + d.seconds, 0);
+        const bestDaySec = Math.max(...last10.map(d => d.seconds));
+
+        const isMilestone = [1, 2, 3, 4, 5, 7, 14, 21, 30, 50, 100].includes(user.streak);
+        const milestones = [1, 2, 3, 4, 5, 7, 14, 21, 30, 50, 100];
+        const nextMilestone = milestones.find(m => m > user.streak) ?? 100;
+        const prevMilestone = milestones.filter(m => m <= user.streak).pop() ?? 0;
+        const daysToNext = nextMilestone - user.streak;
+
+        // ── Study goal progress ──────────────────────────────────
+        const studyPct = Math.min(100, Math.round((dailyStudySeconds / Math.max(dailyTargetSeconds, 1)) * 100));
+        const goalMet = dailyStudySeconds >= dailyTargetSeconds;
+        const todayItems = getTodayItemCount();
+        const r = 15.9;
+        const circumference = 2 * Math.PI * r;
+        const dashOffset = circumference * (1 - studyPct / 100);
+
+        // Day-based fire config: each day makes fire bigger & more premium
+
         return (
           <>
+            {/* Backdrop */}
             <div
-              className="fixed inset-0 z-[110] bg-transparent"
-              onClick={() => setShowStreakPopup(false)}
+              className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm"
+              onClick={() => { setShowStreakPopup(false); setStreakHistoryView(false); }}
             />
-            <div className="absolute top-full right-3 z-[120] mt-2 w-[280px] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in slide-in-from-top-2">
-              <div className={`p-4 ${readingStreak.readToday ? 'bg-gradient-to-br from-orange-500 to-red-500' : 'bg-gradient-to-br from-slate-700 to-slate-800'} text-white`}>
-                <div className="flex items-center gap-3">
-                  <div className="text-3xl">{readingStreak.readToday ? '🔥' : readingStreak.current > 0 ? '🔥' : '💤'}</div>
-                  <div className="flex-1">
-                    <p className="text-3xl font-black leading-none">{readingStreak.current}</p>
-                    <p className="text-[11px] font-bold uppercase tracking-widest opacity-90 mt-0.5">
-                      day{readingStreak.current === 1 ? '' : 's'} streak
-                    </p>
-                  </div>
-                  {readingStreak.longest > 0 && (
-                    <div className="text-right border-l border-white/30 pl-3">
-                      <p className="text-[9px] font-black uppercase tracking-widest opacity-80">Best</p>
-                      <p className="text-xl font-black">{readingStreak.longest}d</p>
-                    </div>
-                  )}
-                </div>
-                <p className="text-[11px] font-medium opacity-90 mt-2">
-                  {readingStreak.readToday
-                    ? `Today you've read ${todayCount > 0 ? todayCount : ''} ${todayCount > 0 ? 'note' + (todayCount === 1 ? '' : 's') : ''} — keep it up!`
-                    : readingStreak.current > 0
-                      ? "Read today to keep your streak alive"
-                      : "Open a note today to start a fresh streak"}
-                </p>
+
+            {/* Confetti when study goal is met */}
+            {goalMet && (
+              <div className="fixed inset-0 z-[115] pointer-events-none overflow-hidden">
+                {[...Array(18)].map((_, i) => (
+                  <div key={i} style={{
+                    position: 'absolute',
+                    left: `${3 + i * 5.5}%`,
+                    top: '-12px',
+                    width: i % 3 === 0 ? 9 : 6,
+                    height: i % 3 === 0 ? 9 : 6,
+                    borderRadius: i % 2 === 0 ? '50%' : '2px',
+                    background: ['#fbbf24','#f87171','#34d399','#60a5fa','#c084fc','#fb923c'][i % 6],
+                    animation: `${i % 2 === 0 ? 'confettiFall' : 'confettiWave'} ${1.1 + (i % 5) * 0.25}s ease-in forwards ${i * 0.07}s`,
+                  }} />
+                ))}
               </div>
-              {/* TODAY + BEST DAY stats */}
-              {(todayCount > 0 || bestDay) && (
-                <div className="px-3 pt-3 pb-1 bg-white grid grid-cols-2 gap-2">
-                  <div className="bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-100 rounded-xl p-2.5">
-                    <p className="text-[9px] font-black text-blue-700 uppercase tracking-widest">Today</p>
-                    <p className="text-xl font-black text-blue-800 leading-tight mt-0.5">{todayCount}</p>
-                    <p className="text-[10px] text-blue-600 font-bold leading-tight">item{todayCount === 1 ? '' : 's'} read</p>
-                  </div>
-                  {bestDay ? (
-                    <div className="bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200 rounded-xl p-2.5">
-                      <p className="text-[9px] font-black text-amber-700 uppercase tracking-widest flex items-center gap-1">
-                        🏆 Best Day
-                      </p>
-                      <p className="text-xl font-black text-amber-800 leading-tight mt-0.5">{bestDay.count}</p>
-                      <p className="text-[10px] text-amber-700 font-bold leading-tight truncate">
-                        on {fmt(bestDay.dateStr)}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5">
-                      <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">🏆 Best Day</p>
-                      <p className="text-xs text-slate-500 font-bold leading-tight mt-1">Start reading!</p>
-                    </div>
-                  )}
-                </div>
-              )}
-              {bestDay && bestDay.count >= 3 && (
-                <div className="mx-3 mb-2 mt-2 bg-gradient-to-r from-amber-100 to-orange-100 border border-amber-200 rounded-lg p-2">
-                  <p className="text-[10px] text-amber-800 font-bold leading-snug">
-                    🎉 You read <span className="font-black">{bestDay.count} different items</span> on {fmtFull(bestDay.dateStr)} — that's your best day yet!
-                  </p>
-                </div>
-              )}
-              <div className="p-3 bg-white">
-                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Last 7 Days</p>
-                <div className="flex items-center justify-between gap-1">
-                  {last7.map((d, i) => (
-                    <div key={i} className="flex flex-col items-center gap-1 flex-1">
-                      <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-black ${
-                        d.read
-                          ? d.dateStr === todayStr
-                            ? 'bg-orange-500 text-white ring-2 ring-orange-300'
-                            : 'bg-orange-100 text-orange-700'
-                          : 'bg-slate-100 text-slate-400'
-                      }`}>
-                        {d.read ? '🔥' : '·'}
-                      </div>
-                      <span className={`text-[9px] font-bold ${d.dateStr === todayStr ? 'text-orange-600' : 'text-slate-500'}`}>
-                        {d.label}
-                      </span>
-                    </div>
+            )}
+
+            {/* ── REWARD EFFECT — coin burst + label ── */}
+            {rewardEffect && (() => {
+              const colors = ['#f59e0b','#fbbf24','#fcd34d','#f87171','#34d399','#60a5fa'];
+              const particles = Array.from({ length: 14 }, (_, i) => {
+                const angle = (i / 14) * 360;
+                const dist = 60 + (i % 3) * 35;
+                const cx = Math.round(Math.cos((angle * Math.PI) / 180) * dist);
+                const cy = Math.round(Math.sin((angle * Math.PI) / 180) * dist);
+                return { i, cx, cy, color: colors[i % colors.length] };
+              });
+              return (
+                <div className="fixed inset-0 z-[9990] pointer-events-none flex items-center justify-center overflow-hidden">
+                  <style>{`
+                    @keyframes rewardPop{0%{transform:scale(0.4) translateY(30px);opacity:0}30%{transform:scale(1.15) translateY(-5px);opacity:1}60%{transform:scale(1) translateY(0);opacity:1}90%{transform:scale(1) translateY(-8px);opacity:1}100%{transform:scale(0.8) translateY(-20px);opacity:0}}
+                    ${particles.map(({ i, cx, cy }) =>
+                      `@keyframes cs${i}{0%{transform:translate(0,0) scale(0.5) rotate(0deg);opacity:1}100%{transform:translate(${cx}px,${cy}px) scale(1) rotate(360deg);opacity:0}}`
+                    ).join('')}
+                  `}</style>
+                  {/* Coin burst particles — each with its own pre-computed keyframe */}
+                  {particles.map(({ i, color }) => (
+                    <div key={i} style={{
+                      position: 'absolute',
+                      width: i % 2 === 0 ? 14 : 10,
+                      height: i % 2 === 0 ? 14 : 10,
+                      borderRadius: i % 3 === 0 ? '50%' : '3px',
+                      background: color,
+                      boxShadow: `0 0 6px ${color}`,
+                      animation: `cs${i} 0.9s cubic-bezier(0.2,0.8,0.4,1) forwards ${i * 0.04}s`,
+                    }} />
                   ))}
+                  {/* Main reward badge */}
+                  <div style={{ animation: 'rewardPop 2.2s ease forwards', textAlign: 'center', zIndex: 1 }}>
+                    <div style={{
+                      background: 'linear-gradient(135deg,#f59e0b,#ef4444)',
+                      borderRadius: '24px',
+                      padding: '18px 32px',
+                      boxShadow: '0 8px 32px rgba(245,158,11,0.5), 0 0 0 4px rgba(255,255,255,0.2)',
+                      border: '2px solid rgba(255,255,255,0.3)',
+                    }}>
+                      <div style={{ fontSize: '36px', lineHeight: 1, marginBottom: '6px' }}>🪙</div>
+                      {rewardEffect.amount > 0 && (
+                        <div style={{ fontSize: '2.2rem', fontWeight: 900, color: '#fff', lineHeight: 1, textShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
+                          +{rewardEffect.amount} CR
+                        </div>
+                      )}
+                      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'rgba(255,255,255,0.85)', marginTop: '4px', letterSpacing: '0.05em' }}>
+                        {rewardEffect.label}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                {dates.length > 0 && (
-                  <div className="mt-3 pt-3 border-t border-slate-100">
-                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Recent Reading Days</p>
-                    <div className="flex flex-wrap gap-1">
-                      {dates.slice(0, 8).map(d => (
-                        <span
-                          key={d}
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            d === todayStr
-                              ? 'bg-orange-500 text-white'
-                              : 'bg-slate-100 text-slate-700'
-                          }`}
-                        >
-                          {fmt(d)}
-                        </span>
+              );
+            })()}
+
+            {/* Compact bottom-sheet modal */}
+            <div className="fixed inset-x-0 bottom-16 z-[120] flex justify-center px-4 pointer-events-none">
+            <div
+              className="relative w-full max-w-sm rounded-3xl shadow-2xl animate-in slide-in-from-bottom-6 fade-in duration-300 pointer-events-auto overflow-hidden"
+              style={{ background: 'linear-gradient(180deg,#171433 0%,#0b0d18 100%)', border: '1px solid rgba(255,255,255,0.08)' }}
+            >
+              {/* Top accent bar */}
+              <div className="absolute inset-x-0 top-0 h-1 rounded-t-3xl" style={{ background: 'linear-gradient(90deg,#f59e0b,#ff7a18,#fbbf24,#f59e0b)', backgroundSize: '200% 100%' }} />
+
+              <button
+                onClick={() => { setShowStreakPopup(false); setStreakHistoryView(false); }}
+                className="absolute top-3.5 right-3.5 w-8 h-8 rounded-full flex items-center justify-center text-white/40 hover:text-white z-10"
+                style={{ background: 'rgba(255,255,255,0.07)', fontSize: '18px', lineHeight: 1 }}
+              >×</button>
+
+              <div className="relative px-5 pt-5 pb-4">
+
+                {!streakHistoryView ? (
+                  <>
+                    {/* ══ COMPACT DEFAULT VIEW ══ */}
+                    {/* Fire + streak  |  Progress circle */}
+                    <div className="flex items-center gap-4 mb-3">
+                      {/* Fire */}
+                      <div className="flex flex-col items-center shrink-0">
+                        <span style={{
+                          fontSize: 46, lineHeight: 1,
+                          filter: 'drop-shadow(0 0 10px rgba(251,146,60,0.7)) drop-shadow(0 0 22px rgba(249,115,22,0.4))',
+                          display: 'block',
+                          animation: user.streak >= 7 ? 'streak-live-fire 1.2s ease-in-out infinite alternate' : undefined,
+                        }}>🔥</span>
+                        <div className="font-black leading-none mt-0.5 text-center" style={{
+                          fontSize: user.streak >= 100 ? '1.9rem' : '2.3rem',
+                          color: '#fbbf24',
+                          textShadow: '0 0 14px rgba(251,146,60,0.55)',
+                        }}>{user.streak}</div>
+                        <div className="text-[9px] font-black uppercase tracking-widest" style={{ color: 'rgba(251,191,36,0.45)' }}>days</div>
+                      </div>
+
+                      <div className="w-px h-16 shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }} />
+
+                      {/* Study goal progress */}
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        {/* SVG circle */}
+                        <div className="relative w-[60px] h-[60px] shrink-0">
+                          <svg viewBox="0 0 36 36" className="w-full h-full" style={{ transform: 'rotate(-90deg)' }}>
+                            <circle cx="18" cy="18" r="15.9" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="2.8" />
+                            <circle
+                              cx="18" cy="18" r="15.9" fill="none"
+                              stroke={goalMet ? '#34d399' : '#f59e0b'}
+                              strokeWidth="2.8"
+                              strokeLinecap="round"
+                              strokeDasharray={`${circumference}`}
+                              strokeDashoffset={`${dashOffset}`}
+                              style={{ transition: 'stroke-dashoffset 1s ease', filter: goalMet ? 'drop-shadow(0 0 3px rgba(52,211,153,0.8))' : 'drop-shadow(0 0 3px rgba(251,191,36,0.7))' }}
+                            />
+                          </svg>
+                          <div className="absolute inset-0 flex flex-col items-center justify-center">
+                            <span className="font-black text-white leading-none" style={{ fontSize: '12px' }}>{studyPct}%</span>
+                          </div>
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[9px] font-black uppercase tracking-wider mb-0.5" style={{ color: 'rgba(255,255,255,0.32)' }}>Aaj Ka Goal</p>
+                          <p className="text-[13px] font-black text-white leading-tight">
+                            {fmtHours(dailyStudySeconds)}
+                            <span className="text-[10px] font-bold ml-1" style={{ color: 'rgba(255,255,255,0.35)' }}>/ {fmtHours(dailyTargetSeconds)}</span>
+                          </p>
+                          <p className="text-[11px] font-semibold mt-0.5" style={{ color: goalMet ? '#34d399' : 'rgba(251,191,36,0.75)' }}>
+                            {goalMet ? '🎉 Goal poora! Shabash!' : `📖 ${todayItems} page${todayItems !== 1 ? 's' : ''} padhe aaj`}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Milestone badge or next milestone chip */}
+                    {isMilestone ? (
+                      <div className="flex items-center gap-2 px-3 py-2 rounded-2xl mb-3" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)' }}>
+                        <span className="text-sm">🏆</span>
+                        <p className="text-[12px] font-black" style={{ color: '#fbbf24' }}>{user.streak} Day Milestone! Zabardast!</p>
+                      </div>
+                    ) : user.streak < 100 ? (
+                      <div className="px-3 py-2.5 rounded-2xl mb-3" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                        <div className="flex justify-between text-[9px] font-bold mb-1.5" style={{ color: 'rgba(255,255,255,0.3)' }}>
+                          <span>🎯 Next milestone: {nextMilestone}d</span>
+                          <span style={{ color: '#fbbf24' }}>{daysToNext}d left</span>
+                        </div>
+                        <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
+                          <div className="h-full rounded-full transition-all duration-700" style={{
+                            width: `${Math.min(100, ((user.streak - prevMilestone) / Math.max(nextMilestone - prevMilestone, 1)) * 100)}%`,
+                            background: 'linear-gradient(90deg,#f59e0b,#fde68a)',
+                            boxShadow: '0 0 5px rgba(251,191,36,0.45)',
+                          }} />
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* Study History toggle */}
+                    <button
+                      onClick={() => setStreakHistoryView(true)}
+                      className="w-full py-2.5 rounded-2xl font-black text-[11px] flex items-center justify-center gap-2 active:scale-95 transition-all"
+                      style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.2)', color: 'rgba(196,181,253,0.82)' }}
+                    >
+                      <span>📊</span> Study History dekho
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {/* ══ HISTORY VIEW (inline, compact) ══ */}
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-[13px] font-black text-white">10-Day Study History</p>
+                      <button onClick={() => setStreakHistoryView(false)} className="text-[10px] font-bold px-2.5 py-1 rounded-xl" style={{ color: 'rgba(255,255,255,0.45)', background: 'rgba(255,255,255,0.07)' }}>← Back</button>
+                    </div>
+
+                    {/* Today highlight */}
+                    <div className="rounded-2xl p-3 mb-3 flex items-center gap-3" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.22)' }}>
+                      <span className="text-xl">⏱️</span>
+                      <div className="flex-1">
+                        <p className="text-[9px] font-black uppercase tracking-widest" style={{ color: '#fbbf24' }}>Today</p>
+                        <p className="text-xl font-black text-white leading-tight">{fmtHours(dailyStudySeconds)}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[9px] font-black uppercase tracking-widest mb-0.5" style={{ color: 'rgba(255,255,255,0.3)' }}>Best Day</p>
+                        <p className="text-base font-black text-white">{fmtHours(bestDaySec)}</p>
+                      </div>
+                    </div>
+
+                    {/* Compact bar chart */}
+                    <div className="flex items-end gap-1.5 mb-1" style={{ height: '80px' }}>
+                      {last10.map((d, i) => {
+                        const pct = maxSec > 0 ? (d.seconds / maxSec) * 100 : 0;
+                        const hrs = d.seconds / 3600;
+                        const barColor = d.isToday
+                          ? 'linear-gradient(180deg,#fde68a,#f59e0b)'
+                          : hrs >= 3 ? 'linear-gradient(180deg,#6ee7b7,#10b981)'
+                          : hrs >= 1 ? 'linear-gradient(180deg,#a5b4fc,#6366f1)'
+                          : 'rgba(255,255,255,0.1)';
+                        return (
+                          <div key={i} className="flex-1 flex flex-col items-center gap-0.5">
+                            <div className="w-full flex flex-col justify-end" style={{ height: '60px' }}>
+                              <div className="w-full rounded-t-md" style={{
+                                height: `${Math.max(pct, d.seconds > 0 ? 10 : 4)}%`,
+                                background: barColor,
+                                minHeight: d.seconds > 0 ? '6px' : '2px',
+                                boxShadow: d.isToday ? '0 0 8px rgba(251,191,36,0.55)' : 'none',
+                                transition: 'height 0.5s ease',
+                              }} />
+                            </div>
+                            <span className="text-[7px] font-black" style={{ color: d.isToday ? '#fbbf24' : 'rgba(255,255,255,0.3)' }}>
+                              {d.isToday ? '●' : d.dayLabel}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="flex items-center gap-3 mt-2">
+                      {[
+                        { color: 'linear-gradient(90deg,#6ee7b7,#10b981)', label: '3h+' },
+                        { color: 'linear-gradient(90deg,#a5b4fc,#6366f1)', label: '1–3h' },
+                        { color: 'rgba(255,255,255,0.15)', label: '<1h' },
+                        { color: 'linear-gradient(90deg,#fde68a,#f59e0b)', label: 'Today' },
+                      ].map(({ color, label }) => (
+                        <div key={label} className="flex items-center gap-1">
+                          <div className="w-2 h-2 rounded-sm" style={{ background: color }} />
+                          <span className="text-[8px] font-bold" style={{ color: 'rgba(255,255,255,0.35)' }}>{label}</span>
+                        </div>
                       ))}
                     </div>
-                  </div>
+                  </>
                 )}
+
               </div>
+            </div>
             </div>
           </>
         );
@@ -6998,6 +9263,8 @@ export const StudentDashboard: React.FC<Props> = ({
                           onClick={() => {
                             const mcq = settings.globalChallengeMcq![0];
                             const isCorrect = i === mcq.correctAnswer;
+                            // Track daily MCQ for prize system
+                            trackDailyMcqAnswer(isCorrect);
                             // ── MY MISTAKE BANK ──────────────────────────
                             // Challenge of the Day auto-submits on tap (no
                             // Submit button) — user reported wrong answers
@@ -7563,6 +9830,7 @@ export const StudentDashboard: React.FC<Props> = ({
           setHwWeek(null);
           setHwActiveHwId(null);
           setHwOpenedDirect(false);
+          setHwSubjectOpenedFrom('HOMEWORK');
           onTabChange('COURSES');
         };
 
@@ -7570,7 +9838,7 @@ export const StudentDashboard: React.FC<Props> = ({
         // Used by today-banner taps and the today-picker modal so the student lands
         // straight on the notes/MCQ chooser screen.
         const openHomeworkDirect = (hw: typeof allHw[number], subId: string) => {
-          const hasNotes = !!(hw.notes && hw.notes.trim());
+          const hasNotes = !!(hw.notes?.trim() || (hw as any).chunkNotes?.trim() || (hw as any).htmlNotes?.trim());
           const hasMcq = !!(hw.parsedMcqs && hw.parsedMcqs.length > 0);
           // Pre-set the view mode so the chooser overlay (or single-mode view) shows correctly.
           if (hasNotes && hasMcq) setHwViewMode('choose');
@@ -7590,6 +9858,7 @@ export const StudentDashboard: React.FC<Props> = ({
           setHwWeek(null);
           setHwActiveHwId(hw.id || '');
           setHwOpenedDirect(true);
+          setHwSubjectOpenedFrom('HOMEWORK');
           onTabChange('COURSES');
         };
 
@@ -7730,6 +9999,27 @@ export const StudentDashboard: React.FC<Props> = ({
                     </div>
                   );
                 })()}
+
+                {/* FULL BOOK COMPARE — Homework section shortcut (ULTRA only) */}
+                {user.subscriptionLevel === 'ULTRA' && user.isPremium && (
+                  <button
+                    onClick={() => setShowFullBookCompare(true)}
+                    className="w-full rounded-2xl p-3.5 bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white shadow-lg relative overflow-hidden text-left active:scale-[0.98] transition-all flex items-center gap-3"
+                  >
+                    <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(105deg,transparent 30%,rgba(168,85,247,0.2) 50%,transparent 70%)', animation: 'shimmer-sweep 2.5s linear infinite' }} />
+                    <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center shrink-0 relative z-10">
+                      <GitCompare size={18} className="text-yellow-400" />
+                    </div>
+                    <div className="flex-1 relative z-10 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <p className="font-black text-sm">Full Book Compare</p>
+                        <span className="text-[8px] font-black bg-yellow-400 text-black px-1.5 py-0.5 rounded-full">ULTRA</span>
+                      </div>
+                      <p className="text-[11px] text-purple-200">Topic select karo — common aur extra points dekho</p>
+                    </div>
+                    <ChevronRight size={15} className="text-purple-300 shrink-0 relative z-10" />
+                  </button>
+                )}
 
                 {/* TODAY'S HOMEWORK BANNER */}
                 {todaysHw.length > 0 && (
@@ -8026,6 +10316,59 @@ export const StudentDashboard: React.FC<Props> = ({
                   );
                 })()}
 
+                {/* ALL SUBJECTS GRID — browse all homework by subject */}
+                {(() => {
+                  // Collect all unique subjects from homework data
+                  const subjectCounts: Record<string, number> = {};
+                  const customBooks: Array<{ id: string; name: string }> = (settings as any)?.customBooks || [];
+                  allHw.forEach(hw => {
+                    // Accept any targetSubject — known, custom, or unknown
+                    const sub = hw.targetSubject || 'general';
+                    subjectCounts[sub] = (subjectCounts[sub] || 0) + 1;
+                  });
+                  // Also include custom books from settings (dedup)
+                  customBooks.forEach(b => {
+                    const hasHw = allHw.some(hw => hw.targetSubject === b.id);
+                    if (hasHw && !subjectCounts[b.id]) subjectCounts[b.id] = allHw.filter(hw => hw.targetSubject === b.id).length;
+                  });
+
+                  const subjectEntries = Object.entries(subjectCounts);
+                  if (subjectEntries.length === 0) return null;
+
+                  const CUSTOM_SUBJECT_GRADIENT = 'from-indigo-500 via-violet-500 to-purple-500';
+                  const gradientFor = (sub: string) => SUBJECT_INFO[sub]?.gradient || CUSTOM_SUBJECT_GRADIENT;
+                  const labelFor = (sub: string) => {
+                    if (sub === 'general') return 'General';
+                    return SUBJECT_INFO[sub]?.label || customBooks.find(b => b.id === sub)?.name || sub;
+                  };
+
+                  return (
+                    <div>
+                      <h4 className="text-[11px] font-black text-slate-500 uppercase tracking-widest px-1 mb-3 flex items-center gap-2">
+                        <BookOpen size={12} /> All Subjects
+                      </h4>
+                      <div className="grid grid-cols-2 gap-3">
+                        {subjectEntries.map(([sub, count]) => (
+                          <button
+                            key={sub}
+                            onClick={() => openSubject(sub)}
+                            className={`relative bg-gradient-to-br ${gradientFor(sub)} text-white rounded-2xl p-4 text-left shadow-md active:scale-[0.97] transition-transform overflow-hidden`}
+                          >
+                            <div className="absolute -top-6 -right-6 w-20 h-20 bg-white/10 rounded-full blur-xl pointer-events-none" />
+                            <div className="relative z-10">
+                              <p className="text-[10px] font-black uppercase tracking-widest opacity-80 mb-1">Homework</p>
+                              <p className="text-sm font-black leading-snug mb-2">{labelFor(sub)}</p>
+                              <span className="inline-flex items-center gap-1 bg-white/20 backdrop-blur text-white text-[10px] font-black px-2 py-0.5 rounded-full">
+                                {count} {count === 1 ? 'note' : 'notes'}
+                              </span>
+                            </div>
+                            <ChevronRight size={16} className="absolute bottom-3 right-3 opacity-60" />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* HOMEWORK MCQ HISTORY (separate from regular MCQ) */}
                 {(() => {
@@ -8091,7 +10434,7 @@ export const StudentDashboard: React.FC<Props> = ({
                     </div>
                     <div className="space-y-2">
                       {pickHws.map((hw, idx) => {
-                        const hasNotes = !!(hw.notes && hw.notes.trim());
+                        const hasNotes = !!(hw.notes?.trim() || (hw as any).chunkNotes?.trim() || (hw as any).htmlNotes?.trim());
                         const hasMcq = !!(hw.parsedMcqs && hw.parsedMcqs.length > 0);
                         return (
                           <button
@@ -8192,12 +10535,14 @@ export const StudentDashboard: React.FC<Props> = ({
                   <button
                     onClick={async () => {
                       try {
-                        await downloadAsMHTML('comp-mcq-printable', `Competition_MCQs_${new Date().toISOString().slice(0,10)}`, {
-                          appName: settings?.appShortName || settings?.appName || 'IIC',
-                          pageTitle: 'Competition MCQs',
-                          subtitle: `Practice MCQ Maker · ${allMcqs.length} questions`,
+                        const _dlOkComp = await checkAndDoDownload(async () => {
+                          await downloadAsMHTML('comp-mcq-printable', `Competition_MCQs_${new Date().toISOString().slice(0,10)}`, {
+                            appName: settings?.appShortName || settings?.appName || 'IIC',
+                            pageTitle: 'Competition MCQs',
+                            subtitle: `Practice MCQ Maker · ${allMcqs.length} questions`,
+                          });
                         });
-                        showAlert(`📥 ${allMcqs.length} MCQs offline save ho gaye!`, 'SUCCESS');
+                        if (_dlOkComp) showAlert(`📥 ${allMcqs.length} MCQs offline save ho gaye!`, 'SUCCESS');
                       } catch (e) {
                         showAlert('Download failed. Please try again.', 'ERROR');
                       }
@@ -8405,6 +10750,7 @@ export const StudentDashboard: React.FC<Props> = ({
 
                           {/* Feedback */}
                           {compMcqSelected !== null && (
+                            <>
                             <div className={`mt-4 p-3 rounded-xl text-sm font-bold ${
                               compMcqSelected === current.correctAnswer
                                 ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
@@ -8414,6 +10760,20 @@ export const StudentDashboard: React.FC<Props> = ({
                                 ? '✅ Sahi answer!'
                                 : `❌ Galat. Sahi answer: Option ${String.fromCharCode(65 + current.correctAnswer)}`}
                             </div>
+                            {/* Share this MCQ to community chat */}
+                            <button
+                              onClick={() => {
+                                const opts = current.options.length === 4
+                                  ? current.options as [string,string,string,string]
+                                  : ([...current.options, '', '', '', ''].slice(0, 4) as [string,string,string,string]);
+                                setMcqCommunityDraft({ question: current.question, options: opts, correctAnswer: current.correctAnswer, explanation: '' });
+                                setShowMcqCommunityPopup(true);
+                              }}
+                              className="mt-2 w-full py-2.5 rounded-xl bg-violet-50 border border-violet-200 text-violet-700 font-bold text-xs flex items-center justify-center gap-2 active:scale-95 transition-all hover:bg-violet-100"
+                            >
+                              <Send size={14} /> Community Chat mein Share Karo
+                            </button>
+                            </>
                           )}
                         </div>
 
@@ -9251,108 +11611,531 @@ export const StudentDashboard: React.FC<Props> = ({
 
       {/* REQUEST CONTENT MODAL */}
       {showRequestModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white rounded-2xl p-6 w-full shadow-xl">
-            <div className="flex items-center gap-2 mb-4 text-pink-600">
-              <Megaphone size={24} />
-              <h3 className="text-lg font-black text-slate-800">
-                Request Content
-              </h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-pink-600 to-rose-500 p-5 text-white">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="bg-white/20 p-2 rounded-xl">
+                    <Megaphone size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black">Content Request</h3>
+                    <p className="text-[11px] text-pink-100">Admin ko demand bhejo</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowRequestModal(false)} className="bg-white/20 p-1.5 rounded-full hover:bg-white/30 transition-all">
+                  <X size={16} />
+                </button>
+              </div>
             </div>
 
-            <div className="space-y-3 mb-6">
+            <div className="p-5 space-y-3">
+              {/* Subject */}
               <div>
-                <label className="text-xs font-bold text-slate-600 uppercase">
-                  Subject
-                </label>
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1 block">Subject ka naam *</label>
                 <input
                   type="text"
                   value={requestData.subject}
-                  onChange={(e) =>
-                    setRequestData({ ...requestData, subject: e.target.value })
-                  }
-                  className="w-full p-2 border rounded-lg"
-                  placeholder="e.g. Mathematics"
+                  onChange={(e) => setRequestData({ ...requestData, subject: e.target.value })}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-pink-400 outline-none"
+                  placeholder="e.g. Mathematics, Science, History..."
                 />
               </div>
+
+              {/* Chapter / Lesson */}
               <div>
-                <label className="text-xs font-bold text-slate-600 uppercase">
-                  Topic / Chapter
-                </label>
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1 block">Lesson / Chapter ka naam *</label>
                 <input
                   type="text"
                   value={requestData.topic}
-                  onChange={(e) =>
-                    setRequestData({ ...requestData, topic: e.target.value })
-                  }
-                  className="w-full p-2 border rounded-lg"
-                  placeholder="e.g. Trigonometry"
+                  onChange={(e) => setRequestData({ ...requestData, topic: e.target.value })}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-pink-400 outline-none"
+                  placeholder="e.g. Trigonometry, Chapter 5..."
                 />
               </div>
+
+              {/* Page Number */}
               <div>
-                <label className="text-xs font-bold text-slate-600 uppercase">
-                  Type
-                </label>
-                <select
-                  value={requestData.type}
-                  onChange={(e) =>
-                    setRequestData({ ...requestData, type: e.target.value })
-                  }
-                  className="w-full p-2 border rounded-lg"
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1 block">Page Number (optional)</label>
+                <input
+                  type="text"
+                  value={requestData.pageNo}
+                  onChange={(e) => setRequestData({ ...requestData, pageNo: e.target.value })}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-pink-400 outline-none"
+                  placeholder="e.g. 45, 100-120..."
+                />
+              </div>
+
+              {/* Content Type */}
+              <div>
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1 block">Kya chahiye?</label>
+                <div className="grid grid-cols-5 gap-1">
+                  {(['PDF','VIDEO','MCQ','NOTES','ANY'] as const).map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setRequestData({ ...requestData, type: t })}
+                      className={`py-2 rounded-xl text-[10px] font-black border-2 transition-all ${requestData.type === t ? 'bg-pink-600 border-pink-600 text-white' : 'bg-slate-50 border-slate-200 text-slate-500 hover:border-pink-300'}`}
+                    >
+                      {t === 'ANY' ? 'Any' : t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Note */}
+              <div>
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1 block">Extra Note (optional)</label>
+                <textarea
+                  value={requestData.note}
+                  onChange={(e) => setRequestData({ ...requestData, note: e.target.value })}
+                  className="w-full p-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-pink-400 outline-none resize-none"
+                  rows={2}
+                  placeholder="Kuch aur batana ho toh likhein..."
+                />
+              </div>
+
+              {/* Buttons */}
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={() => setShowRequestModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border-2 border-slate-200 text-slate-600 text-sm font-bold hover:bg-slate-50 transition-all"
                 >
-                  <option value="PDF">PDF Notes</option>
-                  <option value="VIDEO">Video Lecture</option>
-                  <option value="MCQ">MCQ Test</option>
-                </select>
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (!requestData.subject.trim() || !requestData.topic.trim()) {
+                      showAlert("Subject aur Lesson ka naam zaroori hai", "ERROR");
+                      return;
+                    }
+                    const request = {
+                      id: `dem_${Date.now()}_${Math.random().toString(36).substr(2,5)}`,
+                      userId: user.id,
+                      userName: user.name,
+                      displayId: user.displayId || '',
+                      classLevel: activeSessionClass || user.classLevel || '',
+                      board: activeSessionBoard || user.board || '',
+                      subjectName: requestData.subject.trim(),
+                      chapterName: requestData.topic.trim(),
+                      pageNo: requestData.pageNo.trim(),
+                      contentType: requestData.type,
+                      note: requestData.note.trim(),
+                      timestamp: new Date().toISOString(),
+                      status: 'PENDING',
+                    };
+                    saveDemandRequest(request)
+                      .then(() => {
+                        setShowRequestModal(false);
+                        setRequestData({ subject: '', topic: '', pageNo: '', type: 'PDF', note: '' });
+                        showAlert("✅ Request bhej di gayi! Admin dekhega.", "SUCCESS");
+                      })
+                      .catch(() => showAlert("Request bhejne mein fail hua. Dobara try karo.", "ERROR"));
+                  }}
+                  className="flex-1 py-2.5 rounded-xl bg-pink-600 hover:bg-pink-700 text-white text-sm font-bold shadow-lg transition-all"
+                >
+                  Bhejo 🚀
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* UNIVERSAL CHAT (Global + Support) */}
+      {showChat && (
+        <div
+          className="fixed inset-0 z-[200]"
+          onClick={() => setShowChat(false)}
+        >
+          <div className="w-full h-full" onClick={(e) => e.stopPropagation()}>
+            <UniversalChat
+              user={user}
+              onClose={() => setShowChat(false)}
+              isAdmin={false}
+              allowStudentMcq={!!settings?.allowStudentCommunityMcq}
+              hideGlobalTab={!!settings?.hideGlobalChat}
+              onSpendCoins={handleSpendCoins}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* COMPARE VIEW — opens when user clicks "Compare N Books" in search.
+          Uses a frozen snapshot (compareHits) so clearing the search input
+          does NOT destroy the data before CompareView can mount. */}
+      {showCompareView && compareHits.length >= 1 && (
+        <CompareView
+          hits={compareHits}
+          query={compareQuery}
+          onClose={() => { setShowCompareView(false); setCompareHits([]); }}
+          user={{ subscriptionLevel: user.subscriptionLevel, isPremium: user.isPremium }}
+          settings={settings as Record<string, any>}
+        />
+      )}
+
+      {/* ── FULL BOOK COMPARE MODAL (Ultra only) ─────────────────────────────
+          Aggregates ALL competition books and shows common + extra points
+          paginated with per-book download options.
+      ───────────────────────────────────────────────────────────────────────── */}
+      {showFullBookCompare && (
+        <FullBookCompare
+          settings={settings}
+          user={{ subscriptionLevel: user.subscriptionLevel, isPremium: user.isPremium, isAdmin: user.role === 'ADMIN' || user.role === 'SUB_ADMIN' }}
+          isLimited={!(user.subscriptionLevel === 'ULTRA' && user.isPremium)}
+          freeLimit={(settings as any)?.comparePointsLimit || 4}
+          isFocusMode={isLandscapeUiHidden}
+          onClose={() => setShowFullBookCompare(false)}
+        />
+      )}
+
+      {/* ── LESSON COMPARE MODAL ─────────────────────────────────────────────
+          Opens when student taps "📌 Topics — Compare karein" on a lesson card.
+          Shows all tagged topics in the lesson and lets user jump into CompareView
+          for any individual topic across all books.
+      ───────────────────────────────────────────────────────────────────────── */}
+      {lucentLessonCompare && (() => {
+        const lce = lucentLessonCompare;
+        const stripHtml = (s: string) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+        // Collect unique topicNames from this lesson's pages (ordered by first appearance)
+        const seenTopics = new Set<string>();
+        const topicsInLesson: { topicName: string; pages: LucentPageNote[]; }[] = [];
+        (lce.pages || []).forEach(pg => {
+          const tn = (pg.topicName || '').trim();
+          if (!tn) return;
+          if (!seenTopics.has(tn)) {
+            seenTopics.add(tn);
+            topicsInLesson.push({ topicName: tn, pages: [] });
+          }
+          topicsInLesson.find(t => t.topicName === tn)!.pages.push(pg);
+        });
+
+        // Combined full text of all pages for "Full Lesson" tab (Read Mode)
+        const fullLessonText = (lce.pages || [])
+          .map(p => `${p.topicName ? `📌 ${p.topicName}\n` : ''}${(() => { const src = (p as any).chunkNotes || p.content || ''; return src.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); })()}`)
+          .filter(Boolean)
+          .join('\n\n');
+        // Combined HTML of all pages for "Full Lesson" tab (Write Mode)
+        const fullLessonHtml = (lce.pages || [])
+          .map(p => `${p.topicName ? `<h3 style="color:#4f46e5;margin-top:16px;margin-bottom:6px">📌 ${p.topicName}</h3>` : ''}${(p as any).htmlNotes || p.content || ''}`)
+          .filter(Boolean)
+          .join('<hr style="border-color:#e2e8f0;margin:12px 0"/>');
+
+        // Build compare hits for a given topicName — scans ALL lucentNotes
+        const buildTopicHits = (topicName: string): NoteSearchResult[] => {
+          const hits: NoteSearchResult[] = [];
+          const seen = new Set<string>();
+          ((settings?.lucentNotes || []) as LucentNoteEntry[]).forEach(entry => {
+            (entry.pages || []).forEach((pg, pi) => {
+              const tn = (pg.topicName || '').trim();
+              if (tn !== topicName) return;
+              const key = `lucent_${entry.id}_${pi}`;
+              if (seen.has(key)) return;
+              seen.add(key);
+              const fullText = stripHtml(pg.content || '');
+              hits.push({
+                storageKey: key,
+                chapterId: entry.id,
+                subjectName: entry.subject || 'lucent',
+                board: 'COMPETITION',
+                classLevel: 'COMPETITION',
+                noteTitle: `${entry.lessonTitle}${pg.pageNo ? ` — Pg ${pg.pageNo}` : ''}`,
+                noteContent: fullText.substring(0, 160),
+                noteFullContent: fullText,
+                matchCount: 1,
+                matchedWords: [topicName],
+                chapterTitleFromKey: entry.lessonTitle,
+                bookName: (entry.bookName || entry.lessonTitle || 'Lucent').trim(),
+                pageNo: pg.pageNo,
+                topicName: pg.topicName,
+              });
+            });
+          });
+          // Also scan homework entries for matching topicName
+          ((settings?.homework || []) as import('../types').HomeworkItem[]).forEach(hw => {
+            const tn = (hw.topicName || '').trim();
+            if (tn !== topicName) return;
+            const key = `hw_${hw.id}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            const fullText = stripHtml(hw.notes || (hw as any).chunkNotes || (hw as any).htmlNotes || '');
+            hits.push({
+              storageKey: key,
+              chapterId: hw.id || '',
+              subjectName: hw.subject || 'book',
+              board: 'COMPETITION',
+              classLevel: 'COMPETITION',
+              noteTitle: hw.title || topicName,
+              noteContent: fullText.substring(0, 160),
+              noteFullContent: fullText,
+              matchCount: 1,
+              matchedWords: [topicName],
+              chapterTitleFromKey: hw.title || topicName,
+              bookName: hw.bookId || hw.subject || 'Notes',
+              pageNo: hw.pageNo,
+              topicName: hw.topicName,
+            });
+          });
+          return hits;
+        };
+
+        const openTopicCompare = (topicName: string) => {
+          const hits = buildTopicHits(topicName);
+          if (hits.length === 0) {
+            alert('Is topic ke notes kisi aur book mein nahi mile.');
+            return;
+          }
+          setCompareHits(hits);
+          setCompareQuery(topicName);
+          setShowCompareView(true);
+          setLucentLessonCompare(null);
+          saveCompareAnalytic(`lesson-topic:${topicName}`, hits.length).catch(() => {});
+        };
+
+        return (
+          <div className="fixed inset-0 z-[250] bg-white flex flex-col animate-in fade-in">
+            {/* Header */}
+            <div className={`bg-gradient-to-r from-indigo-700 to-violet-700 text-white px-4 py-3 flex items-center gap-3 shrink-0 shadow-lg${isLandscapeUiHidden ? ' hidden' : ''}`}>
+              <button
+                onClick={() => setLucentLessonCompare(null)}
+                className="bg-white/20 hover:bg-white/30 p-2 rounded-full transition-colors shrink-0"
+              >
+                <ChevronRight size={18} className="rotate-180" />
+              </button>
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] font-black uppercase tracking-wider text-indigo-200">📘 Lesson</p>
+                <h2 className="text-sm font-black truncate">{lce.lessonTitle}</h2>
+                <p className="text-[10px] text-indigo-200">{lce.pages.length} pages · {topicsInLesson.length} topics</p>
               </div>
             </div>
 
-            <div className="flex gap-2">
-              <Button
-                onClick={() => setShowRequestModal(false)}
-                variant="ghost"
-                className="flex-1"
+            {/* Tabs */}
+            <div className="flex bg-slate-100 p-1 gap-1 shrink-0 mx-3 mt-3 rounded-xl">
+              <button
+                onClick={() => setLucentLessonCompareTab('topics')}
+                className={`flex-1 py-2 text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${lucentLessonCompareTab === 'topics' ? 'bg-white shadow text-indigo-700' : 'text-slate-500'}`}
               >
-                Cancel
-              </Button>
-              <Button
-                onClick={() => {
-                  if (!requestData.subject || !requestData.topic) {
-                    showAlert("Please fill all fields", "ERROR");
-                    return;
-                  }
-                  const request = {
-                    id: `req-${Date.now()}`,
-                    userId: user.id,
-                    userName: user.name,
-                    details: `${activeSessionClass || user.classLevel || "10"} ${activeSessionBoard || user.board || "CBSE"} - ${requestData.subject} - ${requestData.topic} - ${requestData.type}`,
-                    timestamp: new Date().toISOString(),
-                  };
-                  // Save to Firebase for Admin Visibility
-                  saveDemandRequest(request)
-                    .then(() => {
-                      setShowRequestModal(false);
-                      showAlert(
-                        "✅ Request Sent! Admin will check it.",
-                        "SUCCESS",
-                      );
-                      // Also save locally just in case
-                      const existing = JSON.parse(
-                        localStorage.getItem("nst_demand_requests") || "[]",
-                      );
-                      existing.push(request);
-                      localStorage.setItem(
-                        "nst_demand_requests",
-                        JSON.stringify(existing),
-                      );
-                    })
-                    .catch(() => showAlert("Failed to send request.", "ERROR"));
-                }}
-                className="flex-1 bg-pink-600 hover:bg-pink-700 shadow-lg"
+                <GitCompare size={12} /> 📌 Topics ({topicsInLesson.length})
+              </button>
+              <button
+                onClick={() => setLucentLessonCompareTab('full')}
+                className={`flex-1 py-2 text-[11px] font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${lucentLessonCompareTab === 'full' ? 'bg-white shadow text-violet-700' : 'text-slate-500'}`}
               >
-                Send Request
-              </Button>
+                <BookOpen size={12} /> Pura Lesson
+              </button>
             </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto pb-8">
+              {/* Topics tab */}
+              {lucentLessonCompareTab === 'topics' && (
+                <div className="px-3 pt-3 space-y-2">
+                  <p className="text-[10px] text-slate-400 font-bold px-1">
+                    Kisi bhi topic pe tap karein — us topic ke notes sab books se compare honge
+                  </p>
+                  {topicsInLesson.length === 0 && (
+                    <div className="text-center py-12 text-slate-400">
+                      <p className="font-bold">Koi tagged topic nahi mila</p>
+                      <p className="text-sm mt-1">Admin ko pages mein topicName tag karna hoga</p>
+                    </div>
+                  )}
+                  {topicsInLesson.map(({ topicName, pages }) => {
+                    const crossBookHits = buildTopicHits(topicName);
+                    const crossBookCount = new Set(crossBookHits.map(h => h.bookName)).size;
+                    return (
+                      <div key={topicName} className="bg-white rounded-2xl border border-indigo-100 overflow-hidden shadow-sm">
+                        {/* Topic header */}
+                        <div className="px-4 py-3 flex items-start gap-3">
+                          <div className="w-8 h-8 rounded-xl bg-indigo-100 flex items-center justify-center shrink-0 mt-0.5">
+                            <span className="text-[11px] font-black text-indigo-600">📌</span>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-black text-slate-800 leading-snug">{topicName}</p>
+                            <p className="text-[10px] text-slate-400 font-medium mt-0.5">
+                              {pages.length} page{pages.length > 1 ? 's' : ''}
+                              {pages[0]?.pageNo ? ` · Pg ${pages.map(p => p.pageNo).join(', ')}` : ''}
+                            </p>
+                          </div>
+                        </div>
+                        {/* Action row */}
+                        <div className="border-t border-indigo-50 flex">
+                          <button
+                            onClick={() => {
+                              // Open this lesson at the first page of this topic
+                              const firstPgIdx = (lce.pages || []).findIndex(p => (p.topicName || '').trim() === topicName);
+                              setLucentNoteViewer(lce);
+                              setLucentPageIndex(Math.max(0, firstPgIdx));
+                              setLucentLessonCompare(null);
+                            }}
+                            className="flex-1 py-2 text-[11px] font-black text-indigo-600 flex items-center justify-center gap-1 hover:bg-indigo-50 transition-colors"
+                          >
+                            <BookOpen size={12} /> Padho
+                          </button>
+                          <div className="w-px bg-indigo-50" />
+                          <button
+                            onClick={() => openTopicCompare(topicName)}
+                            className={`flex-1 py-2 text-[11px] font-black flex items-center justify-center gap-1 transition-colors ${crossBookCount >= 2 ? 'text-violet-700 hover:bg-violet-50' : 'text-slate-400 hover:bg-slate-50'}`}
+                          >
+                            <GitCompare size={12} />
+                            {crossBookCount >= 2 ? `Compare (${crossBookCount} books)` : 'Compare'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Full Lesson tab */}
+              {lucentLessonCompareTab === 'full' && (
+                <div className="px-3 pt-3">
+                  {/* Read / Write toggle */}
+                  <div className="flex items-center gap-1 mb-3 flex-wrap">
+                    <button
+                      onClick={() => { stopSpeech(); setLessonCompareFullViewMode('chunk'); }}
+                      className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-black transition-all border ${lessonCompareFullViewMode === 'chunk' ? 'bg-amber-500 text-white border-amber-500 shadow-sm' : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'}`}
+                    >
+                      <Volume2 size={12} /> Read
+                    </button>
+                    <button
+                      onClick={() => { stopSpeech(); setLessonCompareFullViewMode('html'); }}
+                      className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-black transition-all border ${lessonCompareFullViewMode === 'html' ? 'bg-teal-600 text-white border-teal-600 shadow-sm' : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'}`}
+                    >
+                      <FileText size={12} /> Write
+                    </button>
+                    <div className="flex items-center gap-0 bg-slate-100 rounded-lg overflow-hidden border border-slate-200">
+                      <button onClick={zoomOut} className="px-2 py-1.5 text-slate-600 text-[11px] font-black hover:bg-slate-200 transition-colors" title="Zoom Out">A-</button>
+                      <span className="px-1 text-slate-400 text-[9px] font-bold min-w-[28px] text-center">{Math.round(noteZoom * 100)}%</span>
+                      <button onClick={zoomIn} className="px-2 py-1.5 text-slate-600 text-[11px] font-black hover:bg-slate-200 transition-colors" title="Zoom In">A+</button>
+                    </div>
+                    <button
+                      onClick={handleRotate}
+                      className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-black transition-all border ${isLandscape ? 'bg-green-500 text-white border-green-500 shadow-sm' : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'}`}
+                      title="Screen Rotate"
+                    >
+                      <RotateCcw size={12} /> Rotate
+                    </button>
+                  </div>
+                  {lessonCompareFullViewMode === 'html' ? (
+                    fullLessonHtml ? (
+                      <div>
+                        <button
+                          onClick={async () => {
+                            const safeTitle = (lce.lessonTitle || 'Lesson').replace(/[^a-z0-9]/gi, '_').substring(0, 40);
+                            await checkAndDoDownload(async () => {
+                              await downloadAsMHTML('compare-html-download', safeTitle, { pageTitle: lce.lessonTitle, subtitle: 'Full Lesson — IIC' });
+                            });
+                          }}
+                          className="flex items-center gap-1.5 mb-2 px-3 py-1.5 rounded-lg text-[11px] font-black bg-teal-600 text-white hover:bg-teal-700 transition-all shadow-sm"
+                          data-export-hide="true"
+                        >
+                          <Download size={12} /> Download (Write Mode)
+                        </button>
+                        <div
+                          id="compare-html-download"
+                          className="notes-html-content bg-white rounded-2xl p-4 shadow-sm border border-slate-100 mb-4"
+                          style={{ fontSize: '15px', lineHeight: '1.8', zoom: noteZoom }}
+                        />
+                      </div>
+                    ) : (
+                      <div className="text-center py-12 text-slate-400">
+                        <p className="font-bold">Koi HTML content nahi mila</p>
+                      </div>
+                    )
+                  ) : (
+                    fullLessonText ? (
+                      <div>
+                        <button
+                          onClick={async () => {
+                            const safeTitle = (lce.lessonTitle || 'Lesson').replace(/[^a-z0-9]/gi, '_').substring(0, 40);
+                            const tempDiv = document.createElement('div');
+                            tempDiv.id = 'compare-chunk-download-temp';
+                            tempDiv.style.cssText = 'position:fixed;left:0;top:0;width:1024px;background:#fff;padding:32px;color:#0f172a;font-family:Inter,system-ui,sans-serif;font-size:15px;line-height:1.8;white-space:pre-wrap;z-index:-1;';
+                            tempDiv.textContent = fullLessonText;
+                            document.body.appendChild(tempDiv);
+                            await checkAndDoDownload(async () => {
+                              await downloadAsMHTML('compare-chunk-download-temp', safeTitle, { pageTitle: lce.lessonTitle, subtitle: 'Full Lesson Read Mode — IIC' });
+                            });
+                            setTimeout(() => { try { document.body.removeChild(tempDiv); } catch {} }, 2000);
+                          }}
+                          className="flex items-center gap-1.5 mb-2 px-3 py-1.5 rounded-lg text-[11px] font-black bg-amber-500 text-white hover:bg-amber-600 transition-all shadow-sm"
+                          data-export-hide="true"
+                        >
+                          <Download size={12} /> Download (Read Mode)
+                        </button>
+                        <ChunkedNotesReader
+                          key={`lesson-compare-full-${lce.id}-chunk`}
+                          isUltraUser={_canViewHtmlFree}
+                          userCredits={user.credits || 0}
+                          htmlUnlockCost={settings?.htmlUnlockCost ?? 5}
+                          onHtmlOpen={_trackBasicHtmlOpen}
+                          onSpendCredits={(amt) => handleUserUpdate({ ...user, credits: Math.max(0, (user.credits || 0) - amt) })}
+                          content={fullLessonText}
+                          topBarLabel={lce.lessonTitle}
+                          hideTopBar={isLandscapeUiHidden}
+                          language="hi-IN"
+                        />
+                      </div>
+                    ) : (
+                      <div className="text-center py-12 text-slate-400">
+                        <p className="font-bold">Koi content nahi mila</p>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* TOPIC DIRECTORY VIEW */}
+      {showTopicDirectory && (
+        <TopicDirectoryView
+          settings={settings as Record<string, any>}
+          globalNoteStars={globalNoteStars}
+          onOpenCompare={(hits, query) => {
+            setCompareHits(hits);
+            setCompareQuery(query);
+            setShowTopicDirectory(false);
+            setShowHomeSearch(false);
+            setHomeSearchQuery('');
+            setHomeSearchMode('search');
+            setShowCompareView(true);
+            saveCompareAnalytic(`topic-dir:${query}`, hits.length).catch(() => {});
+          }}
+          onClose={() => setShowTopicDirectory(false)}
+        />
+      )}
+
+      {/* MCQ SEARCH VIEW */}
+      {showMcqSearchView && (
+        <McqSearchView
+          initialQuery={mcqSearchInitialQuery}
+          initialHits={chapterMcqHits}
+          onClose={() => setShowMcqSearchView(false)}
+          user={{ subscriptionLevel: user.subscriptionLevel, isPremium: user.isPremium }}
+          settings={settings as Record<string, any>}
+        />
+      )}
+
+      {/* MCQ COMMUNITY POPUP — opens from "+" button on any MCQ card */}
+      {showMcqCommunityPopup && mcqCommunityDraft && (
+        <div
+          className="fixed inset-0 z-[210]"
+          onClick={() => { setShowMcqCommunityPopup(false); setMcqCommunityDraft(null); }}
+        >
+          <div className="w-full h-full" onClick={(e) => e.stopPropagation()}>
+            <UniversalChat
+              user={user}
+              onClose={() => { setShowMcqCommunityPopup(false); setMcqCommunityDraft(null); }}
+              isAdmin={false}
+              defaultTab="MCQ"
+              initialMcqDraft={mcqCommunityDraft}
+              onSpendCoins={handleSpendCoins}
+            />
           </div>
         </div>
       )}
@@ -9667,7 +12450,7 @@ export const StudentDashboard: React.FC<Props> = ({
 
       {/* FIXED BOTTOM NAVIGATION */}
       <nav
-        className={`fixed bottom-0 left-0 right-0 w-full mx-auto bg-white/95 backdrop-blur-md border-t border-slate-200/70 shadow-[0_-8px_24px_-12px_rgba(15,23,42,0.18)] z-[300] pb-safe ${activeExternalApp || isDocFullscreen || (contentViewStep === "PLAYER" && selectedChapter) ? "hidden" : ""}`}
+        className={`fixed bottom-0 left-0 right-0 w-full mx-auto bg-white/95 backdrop-blur-md border-t border-slate-200/70 shadow-[0_-8px_24px_-12px_rgba(15,23,42,0.18)] z-[300] pb-safe ${activeExternalApp || isDocFullscreen || (contentViewStep === "PLAYER" && selectedChapter) || isLandscapeUiHidden || isInternalImmersive || !!hwActiveHwId ? "hidden" : ""}`}
         aria-label="Primary"
       >
         <div className="relative flex justify-around items-stretch h-[64px] max-w-3xl mx-auto px-1">
@@ -9799,6 +12582,14 @@ export const StudentDashboard: React.FC<Props> = ({
               hapticLight();
               try { stopSpeech(); } catch (_) {}
               setSpeakingId(null);
+              // Close Community Support chat overlay if open — otherwise the
+              // chat keeps covering the dashboard when user taps other nav tabs.
+              setShowChat(false);
+              // Close Full Book Compare overlay — otherwise it stays on screen
+              // when the user taps any other bottom-nav tab.
+              setShowFullBookCompare(false);
+              // Close word-search Compare View if open.
+              setShowCompareView(false);
               // Close the Important Notes overlay if it's open — otherwise the
               // overlay (z-[200]) keeps covering the dashboard even after the
               // user taps Home / Homework / Profile / Revision in bottom nav.
@@ -9848,28 +12639,25 @@ export const StudentDashboard: React.FC<Props> = ({
                 // When the Important Notes overlay is open, Home should NOT
                 // appear active — only ONE bottom-nav tab can be active at a
                 // time. Same rule applies to all sibling tabs below.
-                isActive: !showStarredPage && currentLogicalTab === "HOME",
+                isActive: !showStarredPage && !showChat && !showFullBookCompare && currentLogicalTab === "HOME",
                 onClick: () => switchToLogicalTab("HOME"),
               },
-              // ── HOMEWORK: visible if active homework OR pending mistakes ────
-              // Daily My Mistake lives inside Homework page, so the tab persists
-              // whenever student has unresolved mistakes (even with no homework).
-              ...(() => {
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                const hasActiveHomework = (settings?.homework || []).some((hw) => {
-                  const d = new Date(hw.date);
-                  if (isNaN(d.getTime())) return false;
-                  d.setHours(0, 0, 0, 0);
-                  return d.getTime() >= today.getTime();
-                });
-                const hasMistakes = mistakeCount > 0;
-                return (hasActiveHomework || hasMistakes)
-                  ? [{ id: "HOMEWORK" as const, label: "Homework", Icon: GraduationCap,
-                       isActive: !showStarredPage && currentLogicalTab === "HOMEWORK",
-                       onClick: () => switchToLogicalTab("HOMEWORK") }]
-                  : [];
-              })(),
+
+              // Compre — Full Book Compare shortcut in bottom nav
+              {
+                id: "COMPRE" as any,
+                label: "Compre",
+                Icon: GitCompare,
+                filledOnActive: true,
+                isActive: showFullBookCompare,
+                isBeta: true,
+                onClick: () => {
+                  setShowChat(false);
+                  try { stopProfileStarRead(); } catch (_) {}
+                  setShowStarredPage(false);
+                  setShowFullBookCompare(true);
+                },
+              },
 
               // ── CASCADING SLOT SYSTEM ──────────────────────────────────────
               // Each item occupies its slot only if enabled.
@@ -9881,57 +12669,34 @@ export const StudentDashboard: React.FC<Props> = ({
               //  per user request). Revision Hub now lives in Slot B and remains
               //  admin-toggleable. Important Notes page is reachable from inside GK.
 
-              // Slot A — HISTORY (PERMANENT per user request).
-              // GK has been removed from the bottom nav entirely — it's now
-              // accessible from the GK card inside the Homework page.
-              // Admin can opt back into a GK tab by adding 'HISTORY' to
-              // hiddenBottomNavButtons (which falls back to GK in that slot).
-              ...((settings?.hiddenBottomNavButtons || []).includes('HISTORY')
-                ? [{ id: "GK" as const, label: "GK", Icon: Sparkles,
+              // Slot A — Community Support (GK moved to sidebar; accessible via menu)
+              ...((settings?.hiddenBottomNavButtons || []).includes('COMMUNITY')
+                ? []
+                : [{ id: "COMMUNITY_SUPPORT" as any, label: "Chat", Icon: MessageSquare,
                      filledOnActive: true,
-                     isActive: !showStarredPage && currentLogicalTab === "GK",
-                     onClick: () => switchToLogicalTab("GK") }]
-                : [{ id: "HISTORY" as const, label: "History", Icon: HistoryIcon,
-                     // History icon (clock-with-rewind-arrow) is an OUTLINE
-                     // glyph — its inner clock-hands & numerals are negative
-                     // space. Filling it with `currentColor` (like Star/Home
-                     // do) collapses everything into a solid blue disc, which
-                     // looked like a meaningless blob in the bottom nav. So
-                     // we keep it OUTLINE-only and rely on the active blue
-                     // colour + bold stroke for the active state.
-                     filledOnActive: false,
-                     isActive: !showStarredPage && currentLogicalTab === "HISTORY",
-                     onClick: () => switchToLogicalTab("HISTORY") }]),
+                     isActive: showChat,
+                     onClick: () => {
+                       setShowFullBookCompare(false);
+                       setShowCompareView(false);
+                       try { stopProfileStarRead(); } catch (_) {}
+                       setShowStarredPage(false);
+                       setShowChat(true);
+                     } }]),
 
-              // Slot B — Revision Hub REMOVED from bottom nav per user request.
-              // GK is now permanent in Slot A (taking Revision Hub's old place).
-              // Revision Hub remains accessible from the sidebar / Home tile.
-
-              // Slot B' — Important Notes (Star) — separate from GK now.
+              // Slot B' — Important Notes (Star)
               ...(!settings?.starredPageHidden && !(settings?.hiddenBottomNavButtons || []).includes('IMPORTANT')
                 ? [{ id: "IMPORTANT" as const, label: "Important", Icon: Star,
                      filledOnActive: true,
                      isActive: showStarredPage,
-                     onClick: () => setShowStarredPage(true) }]
+                     onClick: () => {
+                       setShowFullBookCompare(false);
+                       setShowCompareView(false);
+                       setShowChat(false);
+                       setShowStarredPage(true);
+                     } }]
                 : []),
 
-              // Slot C — Video OR Profile (mutual exclusive)
-              //   • Video in bottom nav → Video tab
-              //   • Video moved to top bar → Profile takes this exact slot
-              // Discount LIVE hone par `universalVideoInTopBarEffective` true
-              // ho jata hai → Profile slot Video se replace ho jata hai
-              // (admin setting ke upar override).
-              ...(!universalVideoInTopBarEffective && !(settings?.hiddenBottomNavButtons || []).includes('VIDEO')
-                ? [{ id: "VIDEO" as const, label: "Video", Icon: Video,
-                     featureId: "VIDEO_ACCESS",
-                     isActive: !showStarredPage && currentLogicalTab === "VIDEO",
-                     onClick: () => switchToLogicalTab("VIDEO") }]
-                : (universalVideoInTopBarEffective && !(settings?.hiddenBottomNavButtons || []).includes('PROFILE')
-                ? [{ id: "PROFILE" as const, label: "Profile", Icon: UserIconOutline,
-                     featureId: "PROFILE_PAGE", filledOnActive: true,
-                     isActive: !showStarredPage && currentLogicalTab === "PROFILE",
-                     onClick: () => switchToLogicalTab("PROFILE") }]
-                : [])),
+              // Slot C — Apps store (admin-toggleable)
               ...(!settings?.appStorePageHidden && !(settings?.hiddenBottomNavButtons || []).includes('APP_STORE')
                 ? [
                     {
@@ -9944,6 +12709,16 @@ export const StudentDashboard: React.FC<Props> = ({
                     },
                   ]
                 : []),
+
+              // Profile — always visible, pinned to the right of bottom nav
+              {
+                id: "PROFILE" as const,
+                label: "Profile",
+                Icon: UserIcon,
+                filledOnActive: false,
+                isActive: !showStarredPage && currentLogicalTab === "PROFILE",
+                onClick: () => switchToLogicalTab("PROFILE"),
+              },
             ];
 
             // Filter out hidden tabs first so the sliding indicator math
@@ -9973,7 +12748,7 @@ export const StudentDashboard: React.FC<Props> = ({
                 {/* SLIDING SOFT GLOW behind the active tab icon */}
                 <span
                   aria-hidden
-                  className="pointer-events-none absolute top-1.5 h-9 rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50/80 ring-1 ring-blue-100/60"
+                  className="nav-active-glow pointer-events-none absolute top-1.5 h-9 rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50/80 ring-1 ring-blue-100/60"
                   style={{
                     left: `calc(${activeIndex * tabWidthPct}% + ${tabWidthPct / 2}% - 24px)`,
                     width: '48px',
@@ -9995,6 +12770,7 @@ export const StudentDashboard: React.FC<Props> = ({
                           showAlert("🔒 Locked by Admin.", "ERROR");
                           return;
                         }
+                        hapticMedium();
                         // Trigger ripple burst on every tab EXCEPT Home (Home stays minimal)
                         if (tab.id !== 'HOME') {
                           setNavTapKeys(prev => ({ ...prev, [tab.id]: (prev[tab.id] || 0) + 1 }));
@@ -10045,6 +12821,12 @@ export const StudentDashboard: React.FC<Props> = ({
                             <Lock size={8} className="text-white" />
                           </span>
                         )}
+                        {!isLocked && (tab as any).badge && (
+                          <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-red-500 rounded-full border-2 border-white animate-pulse shadow-sm" />
+                        )}
+                        {!isLocked && (tab as any).isBeta && (
+                          <span className="absolute -top-1 -right-1 text-[7px] font-black bg-orange-500 text-white px-1 py-px rounded-full leading-none border border-white shadow-sm">β</span>
+                        )}
                       </span>
 
                       <span
@@ -10065,191 +12847,864 @@ export const StudentDashboard: React.FC<Props> = ({
         </div>
       </nav>
 
-      {/* SIDEBAR OVERLAY (INLINE) */}
-      {showSidebar && (
-        <div className="fixed inset-0 z-[100] flex animate-in fade-in duration-200">
-          <div
-            className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
-            onClick={() => setShowSidebar(false)}
-          ></div>
+      {/* SIDEBAR POPUP (3-dot style) */}
+      {showSidebar && (() => {
+        const hwAccess = getFeatureAccess('HOMEWORK');
+        const gkAccess = getFeatureAccess('GK_CORNER');
+        const inboxAccess = getFeatureAccess('INBOX');
+        const planAccess = getFeatureAccess('MY_PLAN');
+        const redeemAccess = getFeatureAccess('REDEEM_CODE');
+        const requestAccess = getFeatureAccess('REQUEST_CONTENT');
+        const supportAccess = getFeatureAccess('SUPPORT');
 
-          <div className="w-60 bg-white h-full shadow-2xl relative z-10 flex flex-col slide-in-from-left duration-300">
-            <div className="p-6 bg-slate-900 text-white rounded-br-3xl relative overflow-hidden">
-              <div className="flex flex-col relative z-10">
-                <h2 className="text-3xl font-black italic mb-0.5">
-                  {settings?.appName || "App"}
-                </h2>
-              </div>
-              <button
-                onClick={() => setShowSidebar(false)}
-                className="absolute top-4 right-4 text-slate-400 hover:text-white z-20"
-              >
-                <X size={20} />
-              </button>
-            </div>
+        type SideBtn = { label: string; icon: React.ElementType; color: string; action: () => void; locked: boolean; badge?: boolean };
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-2">
-              {renderSidebarMenuItems()}
+        const essentialItems: SideBtn[] = [
+          ...(!hwAccess.isHidden && !(settings?.hiddenBottomNavButtons || []).includes('HOMEWORK') ? [{
+            label: 'Homework', icon: GraduationCap, color: 'emerald',
+            action: () => { onTabChange("HOMEWORK"); setShowSidebar(false); },
+            locked: !hwAccess.hasAccess,
+          }] : []),
+          ...(!gkAccess.isHidden ? [{
+            label: 'Daily GK', icon: Sparkles, color: 'teal',
+            action: () => { setShowDailyGkHistory(true); setShowSidebar(false); },
+            locked: !gkAccess.hasAccess,
+          }] : []),
+          ...(!inboxAccess.isHidden ? [{
+            label: 'Inbox', icon: Mail, color: 'indigo',
+            action: () => { setShowInbox(true); setShowSidebar(false); },
+            locked: !inboxAccess.hasAccess,
+            badge: (unreadCount + unreadNotifCount) > 0,
+          }] : []),
+        ];
 
-              {/* EXTERNAL APPS */}
-              {settings?.externalApps?.map((app) => (
-                <Button
-                  key={app.id}
-                  onClick={() => {
-                    handleExternalAppClick(app);
-                    setShowSidebar(false);
-                  }}
-                  variant="ghost"
-                  fullWidth
-                  className="justify-start gap-4 p-4 hover:bg-slate-50"
-                >
-                  <div className="bg-cyan-100 text-cyan-600 p-2 rounded-lg">
-                    {app.icon ? (
-                      <img src={app.icon} alt="" className="w-5 h-5" />
+        const premiumItems: SideBtn[] = [
+          ...(!planAccess.isHidden ? [{
+            label: 'My Plan', icon: CreditCard, color: 'purple',
+            action: () => { onTabChange("SUB_HISTORY" as any); setShowSidebar(false); },
+            locked: !planAccess.hasAccess,
+          }] : []),
+          ...(!redeemAccess.isHidden ? [{
+            label: 'Redeem', icon: Gift, color: 'pink',
+            action: () => { onTabChange("REDEEM"); setShowSidebar(false); },
+            locked: !redeemAccess.hasAccess,
+          }] : []),
+        ];
+
+        const utilItems: SideBtn[] = [
+          ...(!requestAccess.isHidden ? [{
+            label: 'Demand', icon: Megaphone, color: 'violet',
+            action: () => { setShowRequestModal(true); setShowSidebar(false); },
+            locked: !requestAccess.hasAccess,
+          }] : []),
+          ...(!supportAccess.isHidden ? [{
+            label: 'Support', icon: MessageSquare, color: 'rose',
+            action: () => { handleSupportEmail(); setShowSidebar(false); },
+            locked: !supportAccess.hasAccess,
+          }] : []),
+        ];
+
+        const colorMap: Record<string, string> = {
+          emerald: 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100',
+          teal:    'bg-teal-50 text-teal-700 hover:bg-teal-100',
+          indigo:  'bg-indigo-50 text-indigo-700 hover:bg-indigo-100',
+          purple:  'bg-purple-50 text-purple-700 hover:bg-purple-100',
+          pink:    'bg-pink-50 text-pink-700 hover:bg-pink-100',
+          violet:  'bg-violet-50 text-violet-700 hover:bg-violet-100',
+          rose:    'bg-rose-50 text-rose-700 hover:bg-rose-100',
+          cyan:    'bg-cyan-50 text-cyan-700 hover:bg-cyan-100',
+        };
+
+        const renderBtn = (item: SideBtn) => (
+          <button
+            key={item.label}
+            onClick={() => {
+              if (item.locked) { showAlert('🔒 Locked by Admin. Upgrade your plan to access.', 'ERROR'); return; }
+              item.action();
+            }}
+            className={`flex items-center gap-2 p-2 rounded-xl font-bold text-xs transition-all relative active:scale-95 ${item.locked ? 'opacity-50 grayscale cursor-not-allowed' : colorMap[item.color] || 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
+          >
+            <item.icon size={14} />
+            <span className="truncate">{item.label}</span>
+            {item.locked && <Lock size={9} className="ml-auto shrink-0 text-red-400" />}
+            {item.badge && <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full animate-pulse" />}
+          </button>
+        );
+
+        const hasExternalApps = settings?.externalApps && settings.externalApps.length > 0;
+        const hasUtil = utilItems.length > 0;
+        const hasPremium = premiumItems.length > 0;
+
+        return (
+          <>
+            <div className="fixed inset-0 z-[9998]" onClick={() => setShowSidebar(false)} />
+            <div className="fixed top-[80px] left-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-100 z-[9999] animate-in fade-in zoom-in-95 duration-150 origin-top-left max-h-[80vh] overflow-y-auto">
+
+              {/* User Profile */}
+              <div className="px-4 pt-4 pb-3 border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-full overflow-hidden shrink-0 flex items-center justify-center font-black text-sm">
+                    {user.subscriptionLevel === 'ULTRA' ? (
+                      <div className="w-full h-full bg-gradient-to-br from-purple-600 to-blue-600 flex items-center justify-center text-white text-base">👑</div>
+                    ) : user.subscriptionLevel === 'BASIC' ? (
+                      <div className="w-full h-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white">⭐</div>
                     ) : (
-                      <Smartphone size={20} />
+                      <div className="w-full h-full bg-slate-200 flex items-center justify-center text-slate-700 text-sm">
+                        {(user.name || 'S').charAt(0).toUpperCase()}
+                      </div>
                     )}
                   </div>
-                  <span className="flex-1 text-left">{app.name}</span>
-                  {app.isLocked && <Lock size={14} className="text-red-500" />}
-                </Button>
-              ))}
-
-              <Button
-                onClick={() => {
-                  onTabChange("CUSTOM_PAGE");
-                  setShowSidebar(false);
-                }}
-                variant="ghost"
-                fullWidth
-                className="justify-start gap-4 p-4 hover:bg-slate-50 relative"
-              >
-                <div className="bg-teal-100 text-teal-600 p-2 rounded-lg">
-                  <Zap size={20} />
-                </div>
-                What's New
-                {hasNewUpdate && (
-                  <span className="absolute top-4 right-4 w-3 h-3 bg-red-500 rounded-full animate-pulse border-2 border-white"></span>
-                )}
-              </Button>
-            </div>
-
-            <div className="p-4 border-t border-slate-100">
-              <div className="bg-slate-50 p-4 rounded-xl flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center text-slate-600 font-bold overflow-hidden">
-                  {user.subscriptionLevel === "ULTRA" ? (
-                    <div className="w-full h-full bg-gradient-to-br from-purple-600 to-blue-600 flex items-center justify-center text-white">
-                      👑
-                    </div>
-                  ) : (
-                    (user.name || "S").charAt(0)
-                  )}
-                </div>
-                <div className="overflow-hidden">
-                  <p className="font-bold text-sm truncate text-slate-800">
-                    {user.name}
-                  </p>
-                  <p className="text-xs text-slate-600 truncate">{user.id}</p>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-black text-slate-800 truncate">{user.name || 'Student'}</p>
+                    <p className="text-[10px] text-slate-500 truncate">{user.subscriptionTier || 'Free Plan'}</p>
+                  </div>
+                  <button onClick={() => setShowSidebar(false)} className="text-slate-300 hover:text-slate-500 shrink-0 transition-colors">
+                    <X size={16} />
+                  </button>
                 </div>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* INBOX MODAL */}
+              {/* Essential */}
+              {essentialItems.length > 0 && (
+                <div className="px-4 pt-3 pb-2 border-b border-slate-100">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Essential</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {essentialItems.map(renderBtn)}
+                  </div>
+                </div>
+              )}
+
+              {/* Premium & Rewards */}
+              {hasPremium && (
+                <div className={`px-4 pt-3 pb-2 ${hasUtil || hasExternalApps ? 'border-b border-slate-100' : 'pb-4'}`}>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Premium & Rewards</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {premiumItems.map(renderBtn)}
+                  </div>
+                </div>
+              )}
+
+              {/* Utilities & Support */}
+              {hasUtil && (
+                <div className={`px-4 pt-3 ${hasExternalApps ? 'pb-2 border-b border-slate-100' : 'pb-4'}`}>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Utilities & Support</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {utilItems.map(renderBtn)}
+                  </div>
+                </div>
+              )}
+
+              {/* External Apps */}
+              {hasExternalApps && (
+                <div className="px-4 pt-3 pb-4">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Apps</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {settings!.externalApps!.map((app) => (
+                      <button
+                        key={app.id}
+                        onClick={() => { handleExternalAppClick(app); setShowSidebar(false); }}
+                        className="flex items-center gap-2 p-2 rounded-xl bg-cyan-50 text-cyan-700 font-bold text-xs hover:bg-cyan-100 transition-all active:scale-95"
+                      >
+                        {app.icon ? <img src={app.icon} alt="" className="w-4 h-4 rounded" /> : <Smartphone size={14} />}
+                        <span className="truncate">{app.name}</span>
+                        {app.isLocked && <Lock size={9} className="text-red-500 ml-auto shrink-0" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Quick Settings — Theme + Background TTS */}
+              {(() => {
+                const themeType = localStorage.getItem("nst_dark_theme_type");
+                const isBlue = isDarkMode && themeType === "blue";
+                const isBlack = isDarkMode && themeType !== "blue";
+                const themeLabel = isBlue ? 'Blue Dark' : isBlack ? 'Black Dark' : 'Light Mode';
+                const isSpeaking = !!(window.speechSynthesis?.speaking);
+                return (
+                  <div className="px-4 pt-3 pb-4 border-t border-slate-100">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Quick Settings</p>
+                    <div className="flex flex-col gap-2">
+                      {/* Theme cycle */}
+                      <button
+                        onClick={() => {
+                          if (!isDarkMode) {
+                            localStorage.setItem("nst_dark_theme_type", "black");
+                            document.documentElement.classList.remove('dark-mode-blue', 'dark-mode-black');
+                            document.documentElement.classList.add('dark-mode', 'dark-mode-black');
+                            onToggleDarkMode?.(true);
+                          } else {
+                            const cur = localStorage.getItem("nst_dark_theme_type");
+                            if (cur === "black") {
+                              localStorage.setItem("nst_dark_theme_type", "blue");
+                              document.documentElement.classList.remove('dark-mode-black');
+                              document.documentElement.classList.add('dark-mode', 'dark-mode-blue');
+                              onToggleDarkMode?.(true);
+                            } else {
+                              document.documentElement.classList.remove('dark-mode', 'dark-mode-blue', 'dark-mode-black');
+                              onToggleDarkMode?.(false);
+                            }
+                          }
+                        }}
+                        className="w-full flex items-center gap-2 p-2 rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200 font-bold text-xs transition-all active:scale-95"
+                      >
+                        {isDarkMode
+                          ? <Sparkles size={14} className={isBlue ? "text-blue-500" : "text-amber-500"} />
+                          : <Zap size={14} className="text-amber-500" />}
+                        <span className="flex-1 text-left">{themeLabel}</span>
+                        <span className="text-[9px] text-slate-400 font-medium">tap to change →</span>
+                      </button>
+                      {/* Background TTS */}
+                      {isSpeaking ? (
+                        <div className="flex gap-2">
+                          <div className="flex-1 flex items-center gap-2 p-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 text-xs font-bold">
+                            <Volume2 size={13} className="text-amber-600 animate-pulse shrink-0" />
+                            <span className="truncate">TTS Playing…</span>
+                          </div>
+                          <button
+                            onClick={() => { stopSpeech(); setBgTtsOn(false); (window as any).__nst_bg_tts__ = false; setShowSidebar(false); }}
+                            className="flex items-center gap-1 px-3 py-2 rounded-xl bg-red-50 border border-red-200 text-red-600 hover:bg-red-100 font-bold text-xs active:scale-95 transition-all shrink-0"
+                          >
+                            <Square size={9} className="fill-current" /> Stop
+                          </button>
+                        </div>
+                      ) : bgTtsOn ? (
+                        <button
+                          onClick={() => { setBgTtsOn(false); (window as any).__nst_bg_tts__ = false; }}
+                          className="w-full flex items-center gap-2 p-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 font-bold text-xs transition-all active:scale-95"
+                        >
+                          <Headphones size={14} className="text-emerald-600" />
+                          <span className="flex-1 text-left">Background Play: ON</span>
+                          <span className="text-[9px] text-emerald-500">tap to off</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => { setBgTtsOn(true); (window as any).__nst_bg_tts__ = true; }}
+                          className="w-full flex items-center gap-2 p-2 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 font-bold text-xs transition-all active:scale-95"
+                        >
+                          <Headphones size={14} />
+                          <span className="flex-1 text-left">Background Play</span>
+                          <span className="text-[9px] text-slate-400">keep TTS on</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+            </div>
+          </>
+        );
+      })()}
+
+      {/* INBOX MODAL — Messages + Updates + Notifications + Gifts */}
       {showInbox && (
         <div
           className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in"
           onClick={() => setShowInbox(false)}
         >
           <div
-            className="bg-white rounded-t-3xl sm:rounded-3xl p-6 w-full shadow-2xl flex flex-col h-[85vh] sm:max-h-[85vh] animate-in slide-in-from-bottom-10"
+            className="bg-white rounded-t-3xl sm:rounded-3xl w-full shadow-2xl flex flex-col h-[90vh] sm:max-h-[88vh] animate-in slide-in-from-bottom-10"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex justify-between items-center mb-6">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 pt-5 pb-3 shrink-0">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600">
+                <div className="w-10 h-10 bg-indigo-100 rounded-2xl flex items-center justify-center text-indigo-600">
                   <Mail size={20} />
                 </div>
                 <div>
-                  <h3 className="text-xl font-black text-slate-800">Inbox</h3>
-                  <p className="text-xs text-slate-500 font-bold">
-                    {unreadCount} unread message{unreadCount !== 1 ? "s" : ""}
+                  <h3 className="text-lg font-black text-slate-800">Mail</h3>
+                  <p className="text-[11px] text-slate-500 font-bold">
+                    {(unreadCount + unreadNotifCount) > 0
+                      ? `${unreadCount + unreadNotifCount} unread`
+                      : 'All caught up!'}
                   </p>
                 </div>
               </div>
-              <button
-                onClick={() => setShowInbox(false)}
-                className="p-2 hover:bg-slate-100 rounded-full text-slate-500 transition-colors"
-              >
+              <button onClick={() => setShowInbox(false)} className="p-2 hover:bg-slate-100 rounded-full text-slate-500">
                 <X size={20} />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto no-scrollbar space-y-3 pb-6">
-              {!user.inbox || user.inbox.length === 0 ? (
-                <div className="text-center py-10 flex flex-col items-center">
-                  <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4 text-slate-300">
-                    <Mail size={32} />
-                  </div>
-                  <p className="text-slate-500 font-bold">No messages yet.</p>
-                </div>
-              ) : (
-                user.inbox.map((msg, idx) => (
-                  <div
-                    key={msg.id || idx}
-                    className={`p-4 rounded-2xl border ${msg.read ? "bg-white border-slate-200 opacity-70" : "bg-indigo-50 border-indigo-200 shadow-sm"}`}
-                  >
-                    <div className="flex justify-between items-start mb-2">
-                      <div className="flex items-center gap-2">
-                        {msg.type === "GIFT" ? (
-                          <Gift size={16} className="text-pink-500" />
-                        ) : (
-                          <MessageSquare size={16} className="text-blue-500" />
-                        )}
-                        <span className="text-xs font-bold text-slate-500">
-                          {new Date(msg.date).toLocaleDateString()}
-                        </span>
-                      </div>
-                      {!msg.read && (
-                        <span className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-pulse"></span>
-                      )}
-                    </div>
-                    <p className="text-sm font-medium text-slate-800 leading-relaxed mb-3">
-                      {msg.text}
-                    </p>
-
-                    {msg.type === "GIFT" && msg.gift && !msg.isClaimed && (
-                      <button
-                        onClick={() =>
-                          claimRewardMessage(msg.id, null, msg.gift)
-                        }
-                        className="w-full py-2.5 bg-gradient-to-r from-pink-500 to-rose-500 text-white rounded-xl font-bold text-sm hover:opacity-90 transition-opacity flex items-center justify-center gap-2 shadow-sm"
-                      >
-                        <Gift size={16} /> Claim Gift
-                      </button>
-                    )}
-                    {msg.type === "GIFT" && msg.gift && msg.isClaimed && (
-                      <div className="text-xs font-bold text-green-600 bg-green-50 p-2 rounded-lg text-center flex items-center justify-center gap-1">
-                        <CheckCircle size={14} /> Gift Claimed
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
+            {/* Tabs */}
+            <div className="flex gap-1 px-4 pb-3 shrink-0 border-b border-slate-100 overflow-x-auto no-scrollbar">
+              <button
+                onClick={() => setInboxTab('MESSAGES')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'MESSAGES' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                <MessageSquare size={11} /> Messages
+                {unreadCount > 0 && <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${inboxTab === 'MESSAGES' ? 'bg-white/20 text-white' : 'bg-red-500 text-white'}`}>{unreadCount}</span>}
+              </button>
+              <button
+                onClick={() => setInboxTab('UPDATES')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'UPDATES' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                <Bell size={11} /> Updates
+                {unreadNotifCount > 0 && <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${inboxTab === 'UPDATES' ? 'bg-white/20 text-white' : 'bg-red-500 text-white'}`}>{unreadNotifCount}</span>}
+              </button>
+              <button
+                onClick={() => setInboxTab('REWARDS')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'REWARDS' ? 'bg-amber-500 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                <Trophy size={11} /> Rewards
+                {(() => {
+                  const cnt = (user.inbox || []).filter(m => m.type === 'REWARD' && !m.isClaimed && (!m.expiresAt || new Date(m.expiresAt).getTime() > Date.now())).length;
+                  return cnt > 0 ? <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${inboxTab === 'REWARDS' ? 'bg-white/20 text-white' : 'bg-red-500 text-white'}`}>{cnt}</span> : null;
+                })()}
+              </button>
             </div>
 
-            {unreadCount > 0 && (
-              <div className="pt-4 border-t border-slate-100 mt-auto">
-                <button
-                  onClick={markInboxRead}
-                  className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm transition-colors"
-                >
-                  Mark all as read
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto no-scrollbar p-4 space-y-3 pb-6">
+              {inboxTab === 'MESSAGES' && (() => {
+                const now = Date.now();
+                const msgs = (user.inbox || []).filter(msg => {
+                  if (!msg.expiresAt) return true;
+                  if (msg.isClaimed) return true;
+                  return new Date(msg.expiresAt).getTime() > now;
+                });
+                if (msgs.length === 0) return (
+                  <div className="text-center py-14 flex flex-col items-center">
+                    <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4 text-slate-300"><Mail size={32} /></div>
+                    <p className="text-slate-500 font-bold text-sm">Koi message nahi</p>
+                    <p className="text-slate-400 text-xs mt-1">Admin se gifts aur rewards yahan aayenge</p>
+                  </div>
+                );
+                return msgs.map((msg, idx) => {
+                  const isExpired = msg.expiresAt && new Date(msg.expiresAt).getTime() < now && !msg.isClaimed;
+                  const expiresAt = msg.expiresAt ? new Date(msg.expiresAt) : null;
+                  const daysLeft = expiresAt ? Math.max(0, Math.ceil((expiresAt.getTime() - now) / 86400000)) : null;
+                  return (
+                    <div key={msg.id || idx} className={`p-4 rounded-2xl border transition-all ${isExpired ? 'bg-slate-50 border-slate-200 opacity-60' : msg.read ? 'bg-white border-slate-200' : 'bg-indigo-50 border-indigo-200 shadow-sm'}`}>
+                      <div className="flex justify-between items-start mb-2">
+                        <div className="flex items-center gap-2">
+                          {msg.type === 'GIFT' ? <Gift size={15} className="text-pink-500" /> : msg.type === 'REWARD' ? <Crown size={15} className="text-amber-500" /> : msg.type === 'REDEEM_CODE' ? <Gift size={15} className="text-indigo-500" /> : <MessageSquare size={15} className="text-blue-500" />}
+                          <span className="text-[10px] font-bold text-slate-400">{new Date(msg.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
+                          {isExpired && <span className="text-[9px] font-black text-red-500 bg-red-50 px-1.5 py-0.5 rounded-full">EXPIRED</span>}
+                          {!isExpired && daysLeft !== null && daysLeft <= 7 && !msg.isClaimed && (
+                            <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${daysLeft <= 2 ? 'text-red-600 bg-red-50' : 'text-amber-600 bg-amber-50'}`}>
+                              ⏳ {daysLeft}d baki
+                            </span>
+                          )}
+                        </div>
+                        {!msg.read && <span className="w-2 h-2 bg-indigo-500 rounded-full animate-pulse shrink-0"></span>}
+                      </div>
+                      <p className="text-sm font-medium text-slate-800 leading-relaxed mb-3 whitespace-pre-line">{msg.text}</p>
+                      {msg.type === 'REDEEM_CODE' && msg.redeemCode && !isExpired && (
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2 bg-slate-100 rounded-xl px-3 py-2">
+                            <span className="flex-1 font-mono font-black text-sm text-slate-800 tracking-wider">{msg.redeemCode}</span>
+                            <button
+                              onClick={() => {
+                                try { navigator.clipboard.writeText(msg.redeemCode); } catch {}
+                              }}
+                              className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg active:scale-95 transition-all"
+                            >
+                              Copy
+                            </button>
+                          </div>
+                          <button
+                            onClick={() => {
+                              try { navigator.clipboard.writeText(msg.redeemCode); } catch {}
+                              setShowInbox(false);
+                              setActiveTab('REDEEM');
+                            }}
+                            className="w-full py-2.5 bg-gradient-to-r from-indigo-500 to-purple-500 text-white rounded-xl font-bold text-sm active:scale-95 transition-all flex items-center justify-center gap-2 shadow-sm"
+                          >
+                            <Gift size={15} /> Code Copy Karke Redeem Karo
+                          </button>
+                          {msg.id?.startsWith('store-disc-') && (
+                            <button
+                              onClick={() => {
+                                setShowInbox(false);
+                                setShowRulesPage(true);
+                              }}
+                              className="w-full py-2.5 bg-gradient-to-r from-violet-500 to-purple-600 text-white rounded-xl font-bold text-sm active:scale-95 transition-all flex items-center justify-center gap-2 shadow-sm"
+                            >
+                              <span>📋</span> Feature Rules Dekho — Free / Basic / Ultra
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {msg.type === 'GIFT' && msg.gift && !msg.isClaimed && !isExpired && (
+                        <button onClick={() => claimRewardMessage(msg.id, null, msg.gift)} className="w-full py-2.5 bg-gradient-to-r from-pink-500 to-rose-500 text-white rounded-xl font-bold text-sm active:scale-95 transition-all flex items-center justify-center gap-2 shadow-sm">
+                          <Gift size={15} /> Claim Gift
+                          {msg.gift.type === 'CREDITS' && <span className="bg-white/20 px-2 py-0.5 rounded-full text-xs">+{msg.gift.value} CR</span>}
+                        </button>
+                      )}
+                      {msg.type === 'REWARD' && (msg.reward || msg.gift) && !msg.isClaimed && !isExpired && (
+                        <button onClick={() => claimRewardMessage(msg.id, msg.reward || null, msg.reward ? undefined : msg.gift)} className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-xl font-bold text-sm active:scale-95 transition-all flex items-center justify-center gap-2 shadow-sm">
+                          <Crown size={15} /> Claim Reward
+                          {!msg.reward && msg.gift?.type === 'CREDITS' && <span className="bg-white/20 px-2 py-0.5 rounded-full text-xs">+{msg.gift.value} CR</span>}
+                        </button>
+                      )}
+                      {msg.isClaimed && (
+                        <div className="text-xs font-bold text-green-600 bg-green-50 p-2 rounded-xl text-center flex items-center justify-center gap-1">
+                          <CheckCircle size={13} /> Claimed
+                        </div>
+                      )}
+                    </div>
+                  );
+                });
+              })()}
+
+              {inboxTab === 'REWARDS' && (() => {
+                const engRewards = settings?.engagementRewards || [];
+                const signupAmt = settings?.signupBonus || 0;
+                const loginCfg = settings?.loginBonusConfig;
+                const freeBonus = loginCfg?.freeBonus ?? 2;
+                const basicBonus = loginCfg?.basicBonus ?? 5;
+                const ultraBonus = loginCfg?.ultraBonus ?? 10;
+                const hasAnyLoginBonus = freeBonus > 0 || basicBonus > 0 || ultraBonus > 0;
+                const pendingRewardMsgs = (user.inbox || []).filter(m => m.type === 'REWARD' && !m.isClaimed && (!m.expiresAt || new Date(m.expiresAt).getTime() > Date.now()));
+                const claimedRewardMsgs = (user.inbox || []).filter(m => m.isClaimed).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+                return (
+                  <div className="space-y-3">
+                    {/* Sub-tabs */}
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={() => setRewardSubTab('EARNED')}
+                        className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-2xl text-[11px] font-black transition-all ${rewardSubTab === 'EARNED' ? 'bg-amber-500 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                      >
+                        🎁 Mila Reward
+                        {pendingRewardMsgs.length > 0 && (
+                          <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${rewardSubTab === 'EARNED' ? 'bg-white/20 text-white' : 'bg-red-500 text-white'}`}>{pendingRewardMsgs.length}</span>
+                        )}
+                      </button>
+                      <button
+                        onClick={() => setRewardSubTab('RULES')}
+                        className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-2xl text-[11px] font-black transition-all ${rewardSubTab === 'RULES' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                      >
+                        📋 Rules
+                      </button>
+                      <button
+                        onClick={() => {
+                          setRewardSubTab('HISTORY');
+                          const newCount = claimedRewardMsgs.length;
+                          setRewardHistorySeenCount(newCount);
+                          localStorage.setItem(`nst_reward_hist_seen_${user?.id || ''}`, String(newCount));
+                        }}
+                        className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-2xl text-[11px] font-black transition-all ${rewardSubTab === 'HISTORY' ? 'bg-violet-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                      >
+                        📜 History
+                        {claimedRewardMsgs.length > rewardHistorySeenCount && (
+                          <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${rewardSubTab === 'HISTORY' ? 'bg-white/20 text-white' : 'bg-violet-500 text-white'}`}>{claimedRewardMsgs.length - rewardHistorySeenCount}</span>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* EARNED sub-tab */}
+                    {rewardSubTab === 'EARNED' && (
+                      <div className="space-y-3">
+                        {/* Credits balance */}
+                        <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-4 flex items-center justify-between">
+                          <div>
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Aapke Credits</p>
+                            <p className="text-2xl font-black text-yellow-400">{user.credits || 0} CR</p>
+                          </div>
+                          <button onClick={() => { setShowInbox(false); onTabChange('STORE'); }} className="text-xs font-black bg-gradient-to-r from-indigo-500 to-purple-500 text-white px-4 py-2 rounded-full active:scale-95 transition-all">
+                            Store Dekho →
+                          </button>
+                        </div>
+                        {/* Claimable rewards */}
+                        {pendingRewardMsgs.length > 0 ? (
+                          <div className="space-y-2">
+                            {pendingRewardMsgs.map((msg, idx) => {
+                              const expMs = msg.expiresAt ? new Date(msg.expiresAt).getTime() - nowTick : null;
+                              const isAboutToExpire = expMs !== null && expMs > 0 && expMs < 3 * 60 * 60 * 1000;
+                              const cdText = msg.expiresAt ? fmtCountdown(msg.expiresAt) : null;
+                              // Detect reward type for animation
+                              const isCoins = msg.gift?.type === 'CREDITS' || (msg.text && /coin|credit|CR/i.test(msg.text));
+                              const isSub = msg.type === 'REWARD' || msg.gift?.type === 'SUBSCRIPTION';
+                              const isDiscount = msg.text && /discount|off|छूट/i.test(msg.text);
+                              const isCode = msg.text && /code|redeem|कोड/i.test(msg.text);
+                              const isAnim = msg.gift?.type === 'ANIMATION';
+                              // Card style based on type
+                              const cardStyle = isSub ? 'bg-gradient-to-br from-violet-50 to-purple-50 border-violet-200'
+                                : isDiscount ? 'bg-gradient-to-br from-rose-50 to-pink-50 border-rose-200'
+                                : isCode ? 'bg-gradient-to-br from-cyan-50 to-blue-50 border-cyan-200'
+                                : isAnim ? 'bg-gradient-to-br from-fuchsia-50 to-pink-50 border-fuchsia-200'
+                                : isAboutToExpire ? 'bg-red-50 border-red-200'
+                                : 'bg-gradient-to-br from-amber-50 to-yellow-50 border-amber-200';
+                              const iconBg = isSub ? 'bg-violet-200 text-violet-700'
+                                : isDiscount ? 'bg-rose-200 text-rose-700'
+                                : isCode ? 'bg-cyan-200 text-cyan-700'
+                                : isAnim ? 'bg-fuchsia-200 text-fuchsia-700'
+                                : isAboutToExpire ? 'bg-red-200 text-red-700'
+                                : 'bg-amber-200 text-amber-700';
+                              const iconEmoji = isSub ? '👑' : isDiscount ? '%' : isCode ? '🎟️' : isAnim ? '✨' : isCoins ? '🪙' : '🎁';
+                              const btnGrad = isSub ? 'from-violet-500 to-purple-500'
+                                : isDiscount ? 'from-rose-500 to-pink-500'
+                                : isCode ? 'from-cyan-500 to-blue-500'
+                                : isAnim ? 'from-fuchsia-500 to-pink-500'
+                                : 'from-amber-500 to-orange-500';
+                              return (
+                              <div
+                                key={msg.id || idx}
+                                className={`border rounded-2xl p-4 flex items-start gap-3 relative overflow-hidden ${cardStyle}`}
+                                style={{ animation: 'rewardPulse 2s ease-in-out infinite' }}
+                              >
+                                {/* Shimmer overlay */}
+                                <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(105deg, transparent 40%, rgba(255,255,255,0.35) 50%, transparent 60%)', animation: 'rewardShimmer 2.5s ease-in-out infinite' }} />
+                                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5 text-lg ${iconBg}`} style={{ animation: 'rewardBounce 1.5s ease-in-out infinite' }}>
+                                  {iconEmoji}
+                                </div>
+                                <div className="flex-1 min-w-0 relative z-10">
+                                  <p className="text-sm font-bold text-slate-800 leading-snug mb-1">{msg.text}</p>
+                                  {cdText && (
+                                    <div className={`flex items-center gap-1 text-[11px] font-black mb-2 ${isAboutToExpire ? 'text-red-600' : 'text-amber-600'}`}>
+                                      <span>⏱</span>
+                                      <span>{cdText} — jaldi claim karo!</span>
+                                    </div>
+                                  )}
+                                  {/* Gift badge chips */}
+                                  <div className="flex flex-wrap gap-1 mb-2">
+                                    {msg.gift?.type === 'CREDITS' && <span className="text-[9px] font-black bg-yellow-100 text-yellow-700 border border-yellow-200 px-2 py-0.5 rounded-full">+{msg.gift.value} Coins</span>}
+                                    {msg.gift?.type === 'SUBSCRIPTION' && <span className="text-[9px] font-black bg-violet-100 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">Subscription Gift</span>}
+                                    {msg.gift?.type === 'ANIMATION' && <span className="text-[9px] font-black bg-fuchsia-100 text-fuchsia-700 border border-fuchsia-200 px-2 py-0.5 rounded-full">✨ Animation Effect</span>}
+                                    {isCode && <span className="text-[9px] font-black bg-cyan-100 text-cyan-700 border border-cyan-200 px-2 py-0.5 rounded-full">🎟️ Redeem Code</span>}
+                                    {isDiscount && <span className="text-[9px] font-black bg-rose-100 text-rose-700 border border-rose-200 px-2 py-0.5 rounded-full">💸 Discount</span>}
+                                  </div>
+                                  <button onClick={() => claimRewardMessage(msg.id, msg.reward || null, msg.gift || null)} className={`w-full py-2 bg-gradient-to-r ${btnGrad} text-white rounded-xl font-black text-xs active:scale-95 transition-all flex items-center justify-center gap-1.5 shadow-sm`}>
+                                    <Crown size={12} /> Claim Reward
+                                  </button>
+                                </div>
+                              </div>
+                              );
+                            })}
+                            <style>{`
+                              @keyframes rewardPulse { 0%,100%{box-shadow:0 0 0 0 rgba(251,191,36,0.1)} 50%{box-shadow:0 0 12px 3px rgba(251,191,36,0.2)} }
+                              @keyframes rewardShimmer { 0%{transform:translateX(-100%)} 60%,100%{transform:translateX(200%)} }
+                              @keyframes rewardBounce { 0%,100%{transform:translateY(0) scale(1)} 50%{transform:translateY(-3px) scale(1.05)} }
+                            `}</style>
+                          </div>
+                        ) : (
+                          <div className="text-center py-10 flex flex-col items-center">
+                            <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center mb-3 text-amber-300 text-3xl">🎁</div>
+                            <p className="text-slate-500 font-bold text-sm">Abhi koi pending reward nahi</p>
+                            <p className="text-slate-400 text-xs mt-1">Padhte raho, rewards milenge!</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* RULES sub-tab */}
+                    {rewardSubTab === 'RULES' && (
+                      <div className="space-y-2">
+                        {/* Signup Bonus */}
+                        {signupAmt > 0 && (
+                          <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl p-3.5 flex items-center gap-3">
+                            <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0 text-blue-600 text-xl">🎉</div>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-black text-sm text-slate-800">Signup Bonus</p>
+                              <p className="text-[11px] text-slate-500 mt-0.5">Sirf pehli baar join karne pe — ek baar milega</p>
+                            </div>
+                            <span className="font-black text-blue-700 text-base shrink-0">+{signupAmt} CR</span>
+                          </div>
+                        )}
+                        {/* Daily Login Bonus — per tier */}
+                        {hasAnyLoginBonus && (
+                          <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-2xl p-3.5 space-y-2">
+                            <div className="flex items-center gap-2 mb-1">
+                              <div className="w-8 h-8 bg-green-100 rounded-xl flex items-center justify-center shrink-0 text-green-600 text-lg">🌅</div>
+                              <div>
+                                <p className="font-black text-sm text-slate-800">Roz Login Bonus</p>
+                                <p className="text-[10px] text-slate-500">Har roz app kholne pe — sirf 1 baar milega</p>
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-green-100">
+                              <div className="bg-white rounded-xl p-2 text-center border border-green-100">
+                                <p className="text-[9px] font-black text-slate-400 uppercase">Free</p>
+                                <p className="font-black text-green-700 text-sm mt-0.5">+{freeBonus} CR</p>
+                              </div>
+                              <div className="bg-white rounded-xl p-2 text-center border border-amber-100">
+                                <p className="text-[9px] font-black text-amber-500 uppercase">Basic</p>
+                                <p className="font-black text-amber-700 text-sm mt-0.5">+{basicBonus} CR</p>
+                              </div>
+                              <div className="bg-white rounded-xl p-2 text-center border border-violet-100">
+                                <p className="text-[9px] font-black text-violet-500 uppercase">Ultra</p>
+                                <p className="font-black text-violet-700 text-sm mt-0.5">+{ultraBonus} CR</p>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        {/* Engagement Rewards */}
+                        {engRewards.filter(r => r.enabled).map(r => {
+                          const mins = Math.round(r.seconds / 60);
+                          return (
+                            <div key={r.id} className="bg-gradient-to-r from-purple-50 to-violet-50 border border-purple-200 rounded-2xl p-3.5 flex items-center gap-3">
+                              <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center shrink-0 text-purple-600 text-xl">📚</div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-black text-sm text-slate-800">{r.label || `${mins} Min Study Reward`}</p>
+                                <p className="text-[11px] text-slate-500 mt-0.5">{mins} minute padhne pe milega</p>
+                              </div>
+                              <span className="font-black text-purple-700 text-base shrink-0 text-right">
+                                {r.type === 'COINS' ? `+${r.amount} CR` : `${r.subTier || ''} ${r.subLevel || ''}`}
+                              </span>
+                            </div>
+                          );
+                        })}
+                        {/* MCQ Reward Rules */}
+                        {(() => {
+                          const mcqRules = (settings?.mcqRewardRules || []).filter(r => r.enabled);
+                          const minMcq = settings?.mcqDailyMinimum ?? 50;
+                          if (mcqRules.length === 0) return null;
+                          return (
+                            <div className="bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-2xl p-3.5 space-y-2">
+                              <div className="flex items-center gap-2 mb-1">
+                                <div className="w-8 h-8 bg-orange-100 rounded-xl flex items-center justify-center shrink-0 text-orange-600 text-lg">🎯</div>
+                                <div>
+                                  <p className="font-black text-sm text-slate-800">MCQ Prize System</p>
+                                  <p className="text-[10px] text-slate-500">Daily {minMcq}+ MCQ solve karo aur % ke hisab se prize pao!</p>
+                                </div>
+                              </div>
+                              <div className="space-y-1 pt-1 border-t border-orange-100">
+                                {mcqRules.map(r => (
+                                  <div key={r.id} className="flex items-center justify-between bg-white rounded-xl px-3 py-2 border border-orange-100">
+                                    <div>
+                                      <p className="text-xs font-black text-slate-700">{r.label}</p>
+                                      <p className="text-[10px] text-slate-400">{r.minPercentage}%+ marks required</p>
+                                    </div>
+                                    <span className="text-xs font-black text-orange-700 bg-orange-50 border border-orange-100 px-2 py-1 rounded-full shrink-0">
+                                      {r.rewardType === 'COINS' ? `+${r.rewardAmount} CR` : `${r.rewardSubTier} ${r.rewardSubLevel}`}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                              <p className="text-[10px] text-slate-500 pt-1 border-t border-orange-100">
+                                📌 Rules: Daily minimum {minMcq} MCQ solve karna zaroori hai reward ke liye. Competition, Lucent aur Class 6-12 ke saare MCQ count hote hain.
+                              </p>
+                            </div>
+                          );
+                        })()}
+                        {engRewards.filter(r => r.enabled).length === 0 && !hasAnyLoginBonus && signupAmt === 0 && (settings?.mcqRewardRules || []).filter(r => r.enabled).length === 0 && (
+                          <div className="text-center py-10 flex flex-col items-center">
+                            <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-300"><Trophy size={30} /></div>
+                            <p className="text-slate-500 font-bold text-sm">Abhi koi active reward nahi</p>
+                            <p className="text-slate-400 text-xs mt-1">Admin rewards set karega tab yahan dikhenge</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* HISTORY sub-tab */}
+                    {rewardSubTab === 'HISTORY' && (
+                      <div className="space-y-2">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Sabhi Claimed Rewards (Last 7 Days)</p>
+                        {(() => {
+                          const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+                          const recentHistory = claimedRewardMsgs.filter(msg => {
+                            if (!msg.date) return true;
+                            try { return new Date(msg.date).getTime() >= sevenDaysAgo; } catch { return true; }
+                          });
+                          if (recentHistory.length === 0) return (
+                          <div className="text-center py-10 flex flex-col items-center">
+                            <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-300 text-3xl">📜</div>
+                            <p className="text-slate-500 font-bold text-sm">Koi history nahi abhi</p>
+                            <p className="text-slate-400 text-xs mt-1">Jab bhi reward claim karoge yahan dikhega (7 din tak)</p>
+                          </div>
+                          );
+                          return recentHistory.map((msg, idx) => {
+                          const claimedAt = msg.date ? new Date(msg.date) : null;
+                          const expiresAt = msg.expiresAt ? new Date(msg.expiresAt) : null;
+                          const expiryMs = expiresAt ? expiresAt.getTime() - nowTick : null;
+                          const isExpired = expiryMs !== null && expiryMs <= 0;
+                          const cdText = !isExpired && expiresAt && !msg.isClaimed ? fmtCountdown(msg.expiresAt!) : null;
+                          return (
+                          <div key={msg.id || idx} className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 flex items-start gap-3">
+                            <div className="w-8 h-8 bg-green-100 rounded-xl flex items-center justify-center shrink-0 text-green-600 mt-0.5">
+                              <CheckCircle size={16} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-bold text-slate-700 leading-snug">{msg.text}</p>
+                              <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                {claimedAt && (
+                                  <p className="text-[10px] text-slate-400 font-semibold">
+                                    {(() => { try { return claimedAt.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } })()}
+                                  </p>
+                                )}
+                                {cdText && (
+                                  <span className="text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
+                                    ⏱ {cdText}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <span className="text-[10px] font-black text-green-600 bg-green-50 border border-green-100 px-2 py-1 rounded-full shrink-0">Claimed</span>
+                          </div>
+                          );
+                        });
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {inboxTab === 'UPDATES' && (() => {
+                const subjectIcon: Record<string, string> = {
+                  biology: '🧬', chemistry: '⚗️', physics: '⚛️', economics: '📈',
+                  geography: '🌏', polity: '⚖️', history: '📜',
+                };
+                const tierLabel = (t: string) => t === 'ULTRA' ? '⚡ Ultra' : t === 'BASIC' ? '🔵 Basic' : '🆓 Free';
+                const tierColor = (t: string) => t === 'ULTRA' ? 'bg-violet-100 text-violet-700' : t === 'BASIC' ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700';
+
+                const handleContentItemClick = (item: ContentNotifItem) => {
+                  const entry = _allLucentNotes.find(e => e.id === item.entryId);
+                  if (!entry) { showAlert('Content nahi mila. Refresh karein.', 'ERROR'); return; }
+                  if (item.requiredTier === 'ULTRA' && !_isUltraUser && user.role !== 'ADMIN') {
+                    showAlert('यह content Ultra plan mein available hai! Store se upgrade karein. ⚡', 'INFO');
+                    return;
+                  }
+                  if (item.requiredTier === 'BASIC' && !_isBasicUser && !_isUltraUser && user.role !== 'ADMIN') {
+                    showAlert('यह content Basic / Ultra plan mein available hai! Store se upgrade karein. 🔵', 'INFO');
+                    return;
+                  }
+                  markContentItemSeen(user.id, item.id);
+                  setLucentNoteViewer(entry);
+                  setLucentPageListViewer(entry);
+                  setLucentPageIndex(item.pageIndex);
+                  setShowInbox(false);
+                };
+
+                if (allNotifications.length === 0 && _newContentFiltered.length === 0) return (
+                  <div className="text-center py-14 flex flex-col items-center">
+                    <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4 text-slate-300"><Bell size={32} /></div>
+                    <p className="text-slate-500 font-bold text-sm">Koi update nahi</p>
+                    <p className="text-slate-400 text-xs mt-1">Admin ke announcements yahan aayenge</p>
+                  </div>
+                );
+
+                return (
+                  <>
+                    {/* ── New Content Items (Lucent / Competition pages) ── */}
+                    {_newContentFiltered.length > 0 && (
+                      <div className="mb-2">
+                        <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest px-1 mb-2 flex items-center gap-1.5">
+                          <span className="w-4 h-4 bg-amber-100 rounded-full flex items-center justify-center text-[9px]">🆕</span>
+                          Naya Content — Last 7 din
+                        </p>
+                        {_newContentFiltered.map(item => {
+                          const locked = (item.requiredTier === 'ULTRA' && !_isUltraUser && user.role !== 'ADMIN')
+                            || (item.requiredTier === 'BASIC' && !_isBasicUser && !_isUltraUser && user.role !== 'ADMIN');
+                          return (
+                            <button
+                              key={item.id}
+                              onClick={() => handleContentItemClick(item)}
+                              className={`w-full text-left flex items-start gap-3 rounded-2xl p-3.5 mb-2 border transition-all active:scale-[.99] ${locked ? 'bg-slate-50 border-slate-200 opacity-75' : 'bg-gradient-to-r from-amber-50 to-orange-50 border-amber-200 hover:from-amber-100 hover:to-orange-100'}`}
+                            >
+                              <div className="w-9 h-9 rounded-xl bg-white border border-amber-200 flex items-center justify-center shrink-0 text-base shadow-sm">
+                                {subjectIcon[item.subject] || '📖'}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                                  <span className="text-[10px] font-black text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full">📚 {item.bookName}</span>
+                                  <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${tierColor(item.requiredTier)}`}>{tierLabel(item.requiredTier)}</span>
+                                  <span className="text-[10px] text-slate-400 font-medium">{formatContentDate(item.date)}</span>
+                                </div>
+                                <p className="text-sm font-black text-slate-800 truncate">{item.lessonTitle}</p>
+                                <p className="text-[11px] text-slate-500 font-medium">
+                                  Page {item.pageNo} · {item.classLevel === 'COMPETITION' || !item.classLevel ? 'Competition' : `Class ${item.classLevel}`}
+                                </p>
+                              </div>
+                              <div className="shrink-0 self-center">
+                                {locked
+                                  ? <span className="text-[10px] font-black text-violet-600 bg-violet-100 px-2 py-1 rounded-lg">Upgrade</span>
+                                  : <span className="text-amber-400 font-black text-sm">→</span>
+                                }
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* ── Admin Announcements ── */}
+                    {allNotifications.length > 0 && (
+                      <>
+                        {_newContentFiltered.length > 0 && (
+                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1 mb-2 mt-1 flex items-center gap-1.5">
+                            <Bell size={10} /> Admin Announcements
+                          </p>
+                        )}
+                        {allNotifications.map(n => {
+                          const isClaimed = claimedNotifIds.includes(n.id);
+                          const isUnread = !seenNotifIds.includes(n.id);
+                          return (
+                            <div key={n.id} className={`rounded-2xl border p-4 flex items-start gap-3 mb-2 ${n.type === 'reward' ? 'bg-amber-50 border-amber-200' : n.type === 'CONTENT' ? (isUnread ? 'bg-teal-50 border-teal-200' : 'bg-white border-slate-200') : isUnread ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200'}`}>
+                              <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${n.type === 'reward' ? 'bg-amber-200 text-amber-700' : n.type === 'CONTENT' ? 'bg-teal-100 text-teal-700' : 'bg-indigo-200 text-indigo-700'}`}>
+                                {n.type === 'reward' ? <Gift size={18} /> : n.type === 'CONTENT' ? <BookOpen size={18} /> : <Bell size={18} />}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-0.5">
+                                  <p className="font-black text-sm text-slate-800">{n.title}</p>
+                                  {isUnread && <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full shrink-0"></span>}
+                                </div>
+                                <p className="text-xs text-slate-600 leading-relaxed">{n.body}</p>
+                                {n.type === 'reward' && n.rewardCredits && (
+                                  <div className="mt-2">
+                                    {isClaimed ? (
+                                      <span className="text-[10px] font-black text-emerald-600 bg-emerald-100 px-2.5 py-1 rounded-full">✓ Claimed {n.rewardCredits} CR</span>
+                                    ) : (
+                                      <button
+                                        onClick={() => {
+                                          const ids = [...claimedNotifIds, n.id];
+                                          setClaimedNotifIds(ids);
+                                          try { localStorage.setItem('nst_claimed_notifs_v1', JSON.stringify(ids)); } catch {}
+                                          const updated = { ...user, credits: (user.credits || 0) + (n.rewardCredits || 0) };
+                                          handleUserUpdate(updated);
+                                        }}
+                                        className="text-[11px] font-black bg-gradient-to-r from-amber-500 to-orange-500 text-white px-4 py-1.5 rounded-full active:scale-95 transition-transform flex items-center gap-1.5"
+                                      >
+                                        <Crown size={11} /> Claim {n.rewardCredits} CR
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                                <p className="text-[9px] text-slate-400 mt-1.5 font-semibold">
+                                  {(() => { try { return new Date(n.createdAt).toLocaleString('default', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } })()}
+                                </p>
+                              </div>
+                              <button onClick={(e) => {
+                                e.stopPropagation();
+                                const hidden = [...hiddenNotifs, n.id];
+                                setHiddenNotifs(hidden);
+                                try { localStorage.setItem('nst_hidden_notifs', JSON.stringify(hidden)); } catch {}
+                              }} className="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 shrink-0 self-center">
+                                <Trash2 size={16} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+
+            {/* Footer actions */}
+            <div className="px-5 pb-5 pt-3 border-t border-slate-100 shrink-0 flex gap-2">
+              {inboxTab === 'MESSAGES' && unreadCount > 0 && (
+                <button onClick={markInboxRead} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm transition-colors">
+                  Sab padha hua mark karo
                 </button>
-              </div>
-            )}
+              )}
+              {inboxTab === 'UPDATES' && (unreadNotifCount + _newContentCount) > 0 && (
+                <button
+                  onClick={() => {
+                    const ids = allNotifications.map(n => n.id);
+                    setSeenNotifIds(prev => [...new Set([...prev, ...ids])]);
+                    try { localStorage.setItem('nst_seen_notif_ids', JSON.stringify([...seenNotifIds, ...ids])); } catch {}
+                    markAllContentItemsSeen(user.id, _newContentFiltered.map(i => i.id));
+                  }}
+                  className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm transition-colors"
+                >
+                  Sab dekha hua mark karo
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -10309,6 +13764,75 @@ export const StudentDashboard: React.FC<Props> = ({
         />
       )}
 
+      {/* LUCENT PAGE LIST — shown before opening a specific page */}
+      {lucentPageListViewer && !lucentNoteViewer && (() => {
+        const plEntry = lucentPageListViewer;
+        const pages = plEntry.pages || [];
+        const topicNames = [...new Set(pages.map(p => (p.topicName || '').trim()).filter(Boolean))];
+        return (
+          <div className="fixed inset-0 z-[190] flex flex-col animate-in fade-in" style={{ background: 'var(--bg, #f8fafc)' }}>
+            {/* Header */}
+            <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-200 bg-white shrink-0 shadow-sm">
+              <button
+                onClick={() => setLucentPageListViewer(null)}
+                className="p-2 rounded-full bg-slate-100 text-slate-600 active:scale-95 transition-all"
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-black text-slate-800 truncate">{plEntry.lessonTitle}</p>
+                <p className="text-[11px] text-slate-400 font-medium mt-0.5">
+                  {pages.length} page{pages.length !== 1 ? 's' : ''}
+                  {topicNames.length > 0 ? ` · ${topicNames.length} topic${topicNames.length > 1 ? 's' : ''}` : ''}
+                </p>
+              </div>
+              <span className="text-[10px] font-black bg-violet-100 text-violet-600 px-2 py-1 rounded-full shrink-0">
+                📘 Pages
+              </span>
+            </div>
+
+            {/* Page list */}
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+              {pages.map((pg, idx) => {
+                const pgNo = pg.pageNo ? `Pg ${pg.pageNo}` : `Page ${idx + 1}`;
+                const topic = (pg.topicName || '').trim();
+                const preview = ((pg as any).chunkNotes || pg.content || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => { setLucentNoteViewer(plEntry); setLucentPageIndex(idx); }}
+                    className="w-full text-left bg-white border border-slate-200 rounded-2xl px-4 py-3 flex items-center gap-3 active:scale-[0.98] hover:shadow-md transition-all"
+                  >
+                    <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center shrink-0">
+                      <span className="text-[11px] font-black text-violet-600">{idx + 1}</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-black text-slate-700">{pgNo}</span>
+                        {topic && (
+                          <span className="text-[10px] font-bold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full">
+                            📌 {topic}
+                          </span>
+                        )}
+                        {pg.mcqs && pg.mcqs.length > 0 && (
+                          <span className="text-[10px] font-bold bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full">
+                            {pg.mcqs.length} MCQ
+                          </span>
+                        )}
+                      </div>
+                      {preview && (
+                        <p className="text-[11px] text-slate-400 mt-1 truncate">{preview}…</p>
+                      )}
+                    </div>
+                    <ChevronRight size={16} className="text-slate-400 shrink-0" />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* LUCENT PAGE-WISE NOTES VIEWER */}
       {lucentNoteViewer && (() => {
         const entry = lucentNoteViewer;
@@ -10365,10 +13889,40 @@ export const StudentDashboard: React.FC<Props> = ({
         const canGoPrev = safeIndex > 0 || !!prevLesson;
         const canGoNext = safeIndex < totalPages - 1 || !!nextLesson;
         const autoSyncOn = lucentAutoSync;
+
+        // ── Lucent Topic Continuation: merge consecutive pages with same topicName ──
+        // If the admin tagged consecutive pages with the same topicName, stitch their
+        // content so the student reads the full topic without hitting a page-break.
+        const lucentCurrentTopicName = (currentPage?.topicName || '').trim();
+        const lucentContinuationPages: LucentPageNote[] = [];
+        if (lucentCurrentTopicName) {
+          let ci = safeIndex + 1;
+          while (ci < entry.pages.length) {
+            const cand = entry.pages[ci];
+            if ((cand?.topicName || '').trim() === lucentCurrentTopicName) {
+              lucentContinuationPages.push(cand);
+              ci++;
+            } else {
+              break;
+            }
+          }
+        }
+        // Combined speak text: current page + any same-topicName continuation pages
+        const combinedContent = [
+          currentPage?.content || '',
+          ...lucentContinuationPages.map(p => p.content || ''),
+        ].filter(Boolean).join('\n\n');
+        // ────────────────────────────────────────────────────────────────────────────
+
         // Build a per-page text that includes the page number heading so TTS announces it.
         const pageSpeakText = currentPage
-          ? `Page ${currentPage.pageNo}. ${currentPage.content || ''}`
+          ? `Page ${currentPage.pageNo}. ${combinedContent}`
           : '';
+        // Next page index after merging (skip continuation pages)
+        const lucentEffectiveNextIdx = safeIndex + 1 + lucentContinuationPages.length;
+        const lucentNextPageAfterTopic = lucentEffectiveNextIdx < totalPages
+          ? entry.pages[lucentEffectiveNextIdx]
+          : null;
 
         // Save the current page to Continue Reading using the live scroll % so
         // History / Home picks up wherever the student stopped.
@@ -10398,6 +13952,9 @@ export const StudentDashboard: React.FC<Props> = ({
           try { stopSpeech(); } catch {}
           setLucentAutoSync(false);
           setLucentNoteViewer(null);
+          setIsLandscapeUiHidden(false);
+          // If user got here via page list, go back to page list instead of fully closing
+          // (lucentPageListViewer is still set, so page list overlay re-appears)
         };
 
         return (
@@ -10424,7 +13981,7 @@ export const StudentDashboard: React.FC<Props> = ({
               </button>
             )}
             {/* Header */}
-            <div className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-3 flex items-center gap-3 shrink-0">
+            <div className={`bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-3 flex items-center gap-3 shrink-0 ${isLandscapeUiHidden ? 'hidden' : ''}`}>
               <button onClick={closeLucentViewer} className="bg-white/20 hover:bg-white/30 p-2 rounded-full shrink-0 transition-colors">
                 <ChevronRight size={18} className="rotate-180" />
               </button>
@@ -10439,22 +13996,63 @@ export const StudentDashboard: React.FC<Props> = ({
                 </p>
                 <p className="font-black text-sm truncate">{entry.lessonTitle}</p>
               </div>
+              {/* Read / Write toggle — right next to lesson title */}
+              {lucentActiveTab === 'NOTES' && (
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    onClick={() => { stopSpeech(); setLucentNotesViewMode('chunk'); }}
+                    className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${lucentNotesViewMode === 'chunk' ? 'bg-amber-400 text-white border-amber-400 shadow-sm' : 'bg-white/20 text-white border-white/30 hover:bg-white/30'}`}
+                    title="Read Mode"
+                  >
+                    <Volume2 size={11} /> Read
+                  </button>
+                  <button
+                    onClick={() => { stopSpeech(); setLucentNotesViewMode('html'); }}
+                    className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${lucentNotesViewMode === 'html' ? 'bg-teal-400 text-white border-teal-400 shadow-sm' : 'bg-white/20 text-white border-white/30 hover:bg-white/30'}`}
+                    title="Write Mode"
+                  >
+                    <FileText size={11} /> Write
+                  </button>
+                  <div className="flex items-center gap-0 bg-white/20 rounded-lg overflow-hidden border border-white/30 shrink-0">
+                    <button onClick={zoomOut} className="px-1.5 py-1 text-white text-[11px] font-black hover:bg-white/20 transition-colors" title="Zoom Out">A-</button>
+                    <span className="px-0.5 text-white/80 text-[9px] font-bold min-w-[24px] text-center">{Math.round(noteZoom * 100)}%</span>
+                    <button onClick={zoomIn} className="px-1.5 py-1 text-white text-[11px] font-black hover:bg-white/20 transition-colors" title="Zoom In">A+</button>
+                  </div>
+                  <button
+                    onClick={handleRotate}
+                    className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${isLandscape ? 'bg-green-400 text-white border-green-400 shadow-sm' : 'bg-white/20 text-white border-white/30 hover:bg-white/30'}`}
+                    title="Screen Rotate"
+                  >
+                    <RotateCcw size={11} /> Rot
+                  </button>
+                </div>
+              )}
               <div className="flex items-center gap-2 shrink-0">
                 <span className="bg-white/20 px-2.5 py-1 rounded-full text-[11px] font-black whitespace-nowrap">
                   {safeIndex + 1}/{totalPages}
                 </span>
-                {/* Save Offline (HTML) — works for current Lucent page */}
+                {/* Save Offline (HTML) — mode-aware: read → chunk container, write → html container */}
                 <button
                   onClick={async () => {
                     try {
                       const safeTitle = `${entry.lessonTitle || 'Lucent'}_pg${currentPage?.pageNo || safeIndex + 1}`
                         .replace(/[^a-z0-9_\- ]/gi, '_').slice(0, 60);
-                      await downloadAsMHTML('lucent-note-printable', `${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
-                        appName: settings?.appShortName || settings?.appName || 'IIC',
-                        pageTitle: `${entry.lessonTitle || 'Lucent'} · Page ${currentPage?.pageNo || safeIndex + 1}`,
-                        subtitle: 'Lucent Notes',
+                      const _dlOkLuc = await checkAndDoDownload(async () => {
+                        if (lucentNotesViewMode === 'html' && (currentPage?.htmlNotes || currentPage?.content)) {
+                          await downloadAsMHTML('lucent-html-download', safeTitle, {
+                            appName: settings?.appShortName || settings?.appName || 'IIC',
+                            pageTitle: `${entry.lessonTitle || 'Lucent'} · Page ${currentPage?.pageNo || safeIndex + 1}`,
+                            subtitle: 'Lucent Notes — Write Mode',
+                          });
+                        } else {
+                          await downloadAsMHTML('lucent-note-printable', `${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
+                            appName: settings?.appShortName || settings?.appName || 'IIC',
+                            pageTitle: `${entry.lessonTitle || 'Lucent'} · Page ${currentPage?.pageNo || safeIndex + 1}`,
+                            subtitle: 'Lucent Notes',
+                          });
+                        }
                       });
-                      showAlert('📥 Saved offline!', 'SUCCESS');
+                      if (_dlOkLuc) showAlert('📥 Saved!', 'SUCCESS');
                     } catch (e) {
                       showAlert('Download failed. Please try again.', 'ERROR');
                     }
@@ -10465,6 +14063,30 @@ export const StudentDashboard: React.FC<Props> = ({
                 >
                   <Download size={16} />
                 </button>
+
+                {/* PDF Export (Ultra/Lifetime) */}
+                {(user.subscriptionTier === 'LIFETIME' || user.subscriptionLevel === 'ULTRA') && (
+                  <button
+                    onClick={() => {
+                      try {
+                        const printWin = window.open('', '_blank', 'width=800,height=900');
+                        if (!printWin) { showAlert('Pop-up blocked. Please allow pop-ups.', 'ERROR'); return; }
+                        const el = document.getElementById('lucent-note-printable');
+                        const bodyHtml = el ? el.innerHTML : (currentPage?.content || 'No content');
+                        const appName = settings?.appShortName || settings?.appName || 'IIC';
+                        printWin.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${entry.lessonTitle} · Page ${currentPage?.pageNo || safeIndex+1}</title><style>body{font-family:'Segoe UI',Arial,sans-serif;max-width:700px;margin:40px auto;color:#111;font-size:14px;line-height:1.7}.watermark{position:fixed;bottom:30px;right:30px;font-size:48px;font-weight:900;color:rgba(99,102,241,0.08);pointer-events:none;transform:rotate(-20deg)}h1{color:#4f46e5;font-size:18px;margin-bottom:4px}p.sub{color:#6b7280;font-size:11px;margin-bottom:24px;border-bottom:1px solid #e5e7eb;padding-bottom:12px}@media print{.watermark{display:block}}</style></head><body><h1>${entry.lessonTitle}</h1><p class="sub">${appName} · Lucent Book · Page ${currentPage?.pageNo || safeIndex+1} of ${totalPages}</p>${bodyHtml}<div class="watermark">${appName}</div></body></html>`);
+                        printWin.document.close();
+                        printWin.focus();
+                        setTimeout(() => { try { printWin.print(); } catch {} }, 600);
+                      } catch { showAlert('PDF export failed.', 'ERROR'); }
+                    }}
+                    className="bg-white/20 hover:bg-white/30 p-2 rounded-full shrink-0 transition-colors"
+                    title="Export as PDF (Ultra/Lifetime)"
+                    aria-label="Export PDF"
+                  >
+                    <span style={{ fontSize: '13px', lineHeight: 1, fontWeight: 900 }}>PDF</span>
+                  </button>
+                )}
                 <button
                   onClick={() => { const next = !autoSyncOn; setLucentAutoSync(next); if (!next) stopSpeech(); }}
                   className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${autoSyncOn ? 'bg-white text-indigo-700' : 'bg-white/20 text-white'}`}
@@ -10475,8 +14097,9 @@ export const StudentDashboard: React.FC<Props> = ({
                 </button>
               </div>
             </div>
+            {/* Smart Search bar */}
             {/* NOTES / MCQ TAB SWITCHER */}
-            <div className="shrink-0 bg-white border-b border-slate-100 px-4 py-2 flex items-center gap-2">
+            <div className={`shrink-0 bg-white border-b border-slate-100 px-4 py-2 flex items-center gap-2 ${isLandscapeUiHidden ? 'hidden' : ''}`}>
               <button
                 onClick={() => { setLucentActiveTab('NOTES'); }}
                 className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-black transition-all ${
@@ -10506,7 +14129,7 @@ export const StudentDashboard: React.FC<Props> = ({
             {/* Notes scroll area */}
             <div
               ref={lucentScrollContainerRef}
-              className={`flex-1 overflow-y-auto ${lucentActiveTab === 'NOTES' ? '' : 'hidden'}`}
+              className={`flex-1 overflow-y-auto ${lucentActiveTab === 'NOTES' ? '' : 'hidden'} ${!isLandscapeUiHidden ? 'pb-[72px]' : ''}`}
               onScroll={(e) => {
                 const t = e.currentTarget;
                 const max = t.scrollHeight - t.clientHeight;
@@ -10520,11 +14143,60 @@ export const StudentDashboard: React.FC<Props> = ({
               }}
             >
               {currentPage ? (
-                <div className="px-4 pb-2">
+                <div className={lucentNotesViewMode === 'html' ? '' : 'px-4 pb-2'}>
+                  {lucentNotesViewMode === 'html' ? (
+                    /* ── Write Mode: Full-page HTML rendered view ── */
+                    <div>
+                      {(currentPage.htmlNotes || currentPage.content) ? (
+                        <div>
+                          <div style={{ zoom: noteZoom, transformOrigin: 'top left' }}>
+                            <div
+                              id="lucent-html-download"
+                              className="notes-html-content"
+                              style={{ fontSize: '15px', lineHeight: '1.8', padding: '0 16px 24px' }}
+                              dangerouslySetInnerHTML={{ __html: processHtmlForWriteMode(currentPage.htmlNotes || currentPage.content || '') }}
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-slate-50 rounded-2xl p-8 text-center border border-slate-200 mx-4 mt-4">
+                          <FileText size={32} className="text-slate-300 mx-auto mb-2" />
+                          <p className="text-sm font-bold text-slate-500">HTML notes abhi add nahi hue</p>
+                          <p className="text-xs text-slate-400 mt-1">Admin se HTML/CSS formatted notes add karwayein</p>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    /* ── Read Mode: ChunkedNotesReader TTS ── */
                   <ChunkedNotesReader
-                    key={`lucent-reader-${entry.id}-${safeIndex}-${autoSyncOn ? 'auto' : 'manual'}`}
-                    content={pageSpeakText}
+                    key={`lucent-reader-${entry.id}-${safeIndex}-${autoSyncOn ? 'auto' : 'manual'}-chunk`}
+                    isUltraUser={_canViewHtmlFree}
+                    userCredits={user.credits || 0}
+                    htmlUnlockCost={settings?.htmlUnlockCost ?? 5}
+                    onHtmlOpen={_trackBasicHtmlOpen}
+                    onSpendCredits={(amt) => handleUserUpdate({ ...user, credits: Math.max(0, (user.credits || 0) - amt) })}
+                    htmlContent={(() => {
+                      const chunkSrc = (currentPage as any).chunkNotes;
+                      const htmlSrc = (currentPage as any).htmlNotes;
+                      return chunkSrc?.trim() && htmlSrc?.trim() ? htmlSrc.trim() : undefined;
+                    })()}
+                    content={`Page ${currentPage.pageNo}.\n\n${(() => {
+                      const chunkSrc = (currentPage as any).chunkNotes;
+                      const htmlSrc = (currentPage as any).htmlNotes;
+                      if (chunkSrc?.trim()) return chunkSrc.trim();
+                      if (htmlSrc?.trim()) return htmlSrc.trim();
+                      return combinedContent
+                        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                        .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+                        .replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+                        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/[ \t]+/g, ' ')
+                        .replace(/\n{3,}/g, '\n\n').trim();
+                    })()}`}
                     topBarLabel={`Page ${currentPage.pageNo}`}
+                    hideTopBar={isLandscapeUiHidden}
+                    suppressStickyControls={isLandscapeUiHidden}
+                    preferChunkMode={true}
                     autoStart={autoSyncOn}
                     searchQuery={pendingReadQuery}
                     getStarCount={getNoteStarCount}
@@ -10557,9 +14229,16 @@ export const StudentDashboard: React.FC<Props> = ({
                           subtitle: entry.subject,
                         });
                       } catch {}
-                      // Auto-Sync: chain to next page after a small delay.
-                      if (autoSyncOn && safeIndex < totalPages - 1) {
-                        setTimeout(() => setLucentPageIndex(safeIndex + 1), 400);
+                      // Auto-Sync: skip past same-topic continuation pages, land on next new topic.
+                      if (autoSyncOn) {
+                        const nextIdx = lucentEffectiveNextIdx < totalPages
+                          ? lucentEffectiveNextIdx
+                          : safeIndex + 1;
+                        if (nextIdx < totalPages) {
+                          setTimeout(() => setLucentPageIndex(nextIdx), 400);
+                        } else if (nextLesson) {
+                          setTimeout(() => { stopSpeech(); setLucentNoteViewer(nextLesson); setLucentPageIndex(0); }, 600);
+                        }
                       }
                     }}
                     noteKey={`lucent_${entry.id}_p${safeIndex}`}
@@ -10577,6 +14256,70 @@ export const StudentDashboard: React.FC<Props> = ({
                       }
                     )}
                   />
+                  )}
+
+                  {/* ── Page Continuation Card ────────────────────────────────────── */}
+                  {/* Shown at the END of notes when there are more pages/lessons to read.
+                      Gives the student a clear CTA so they never miss that notes continue. */}
+                  {canGoNext && !autoSyncOn && (
+                    <div className="mt-4 mb-2">
+                      {/* Same-topicName pages were already merged above — show "next topic" card */}
+                      {lucentNextPageAfterTopic ? (
+                        <button
+                          onClick={() => { stopSpeech(); setLucentPageIndex(lucentEffectiveNextIdx); }}
+                          className="w-full bg-gradient-to-r from-indigo-50 to-purple-50 border-2 border-indigo-200 rounded-2xl px-4 py-4 flex items-center gap-3 active:scale-[0.98] transition-all group"
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center shrink-0 group-hover:bg-indigo-200 transition-colors">
+                            <BookOpen size={18} className="text-indigo-600" />
+                          </div>
+                          <div className="flex-1 text-left min-w-0">
+                            <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">📖 Aage bhi padhein</p>
+                            <p className="text-sm font-black text-indigo-800 truncate">
+                              Page {lucentNextPageAfterTopic.pageNo}
+                              {lucentNextPageAfterTopic.topicName ? ` — ${lucentNextPageAfterTopic.topicName}` : ''}
+                            </p>
+                            <p className="text-[10px] text-indigo-500">Next topic continue ho raha hai →</p>
+                          </div>
+                          <ChevronRight size={20} className="text-indigo-400 shrink-0" />
+                        </button>
+                      ) : safeIndex < totalPages - 1 ? (
+                        /* Within same lesson — next page */
+                        <button
+                          onClick={() => { stopSpeech(); setLucentPageIndex(safeIndex + 1); }}
+                          className="w-full bg-gradient-to-r from-indigo-50 to-purple-50 border-2 border-indigo-200 rounded-2xl px-4 py-4 flex items-center gap-3 active:scale-[0.98] transition-all group"
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center shrink-0 group-hover:bg-indigo-200 transition-colors">
+                            <BookOpen size={18} className="text-indigo-600" />
+                          </div>
+                          <div className="flex-1 text-left min-w-0">
+                            <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">📖 Page khatam — continue karein</p>
+                            <p className="text-sm font-black text-indigo-800">
+                              Page {entry.pages[safeIndex + 1]?.pageNo} ke notes →
+                            </p>
+                            <p className="text-[10px] text-indigo-500">Is page ke notes khatam, agle page pe jaayein</p>
+                          </div>
+                          <ChevronRight size={20} className="text-indigo-400 shrink-0" />
+                        </button>
+                      ) : nextLesson ? (
+                        /* End of lesson — next lesson */
+                        <button
+                          onClick={() => { stopSpeech(); setLucentNoteViewer(nextLesson); setLucentPageIndex(0); }}
+                          className="w-full bg-gradient-to-r from-purple-50 to-pink-50 border-2 border-purple-200 rounded-2xl px-4 py-4 flex items-center gap-3 active:scale-[0.98] transition-all group"
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-purple-100 flex items-center justify-center shrink-0 group-hover:bg-purple-200 transition-colors">
+                            <BookOpen size={18} className="text-purple-600" />
+                          </div>
+                          <div className="flex-1 text-left min-w-0">
+                            <p className="text-[10px] font-black text-purple-500 uppercase tracking-widest">📚 Agli Chapter</p>
+                            <p className="text-sm font-black text-purple-800 truncate">{nextLesson.lessonTitle}</p>
+                            <p className="text-[10px] text-purple-500">Is chapter ke notes khatam — agli chapter shuru karein</p>
+                          </div>
+                          <ChevronRight size={20} className="text-purple-400 shrink-0" />
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                  {/* ────────────────────────────────────────────────────────────────── */}
                 </div>
               ) : (
                 <div className="text-center text-slate-500 py-16 text-sm">No pages available.</div>
@@ -10703,12 +14446,14 @@ RULES:
                             try {
                               const safeTitle = `${entry.lessonTitle || 'Lucent'}_pg${currentPage?.pageNo || safeIndex + 1}_MCQs`
                                 .replace(/[^a-z0-9_\- ]/gi, '_').slice(0, 60);
-                              await downloadAsMHTML('lucent-mcq-printable', `${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
-                                appName: settings?.appShortName || settings?.appName || 'IIC',
-                                pageTitle: `${entry.lessonTitle || 'Lucent'} · Page ${currentPage?.pageNo || safeIndex + 1} MCQs`,
-                                subtitle: `Lucent MCQs · ${mcqs.length} questions`,
+                              const _dlOkMcq = await checkAndDoDownload(async () => {
+                                await downloadAsMHTML('lucent-mcq-printable', `${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
+                                  appName: settings?.appShortName || settings?.appName || 'IIC',
+                                  pageTitle: `${entry.lessonTitle || 'Lucent'} · Page ${currentPage?.pageNo || safeIndex + 1} MCQs`,
+                                  subtitle: `Lucent MCQs · ${mcqs.length} questions`,
+                                });
                               });
-                              showAlert(`📥 ${mcqs.length} MCQs saved offline!`, 'SUCCESS');
+                              if (_dlOkMcq) showAlert(`📥 ${mcqs.length} MCQs saved offline!`, 'SUCCESS');
                             } catch (e) {
                               showAlert('Download failed. Please try again.', 'ERROR');
                             }
@@ -10923,7 +14668,7 @@ RULES:
             })()}
             {/* Fixed bottom nav — at first/last page, Prev/Next jump to
                 previous / next Lucent lesson automatically. */}
-            <div className="shrink-0 border-t border-slate-100 bg-white px-4 py-3 flex items-center gap-3">
+            <div className={`fixed bottom-0 left-0 right-0 z-[210] pb-safe border-t border-slate-100 bg-white px-4 py-3 flex items-center gap-3 ${isLandscapeUiHidden ? 'hidden' : ''}`}>
               <button onClick={() => { stopSpeech(); goPrev(); }} disabled={!canGoPrev}
                 title={safeIndex <= 0 && prevLesson ? `Previous lesson: ${prevLesson.lessonTitle}` : 'Previous page'}
                 className="flex-1 flex items-center justify-center gap-1.5 py-3 rounded-2xl font-bold text-sm border-2 border-indigo-200 text-indigo-700 hover:bg-indigo-50 active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
@@ -10971,12 +14716,14 @@ RULES:
               onClick={async () => {
                 try {
                   const safeTitle = (activePlayerHw.title || 'Homework_MCQ').replace(/[^a-z0-9_\- ]/gi, '_').slice(0, 60);
-                  await downloadAsMHTML('hw-note-printable', `${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
-                    appName: settings?.appShortName || settings?.appName || 'IIC',
-                    pageTitle: activePlayerHw.title || 'Homework MCQ',
-                    subtitle: 'Homework MCQs',
+                  const _dlOkHwMcq = await checkAndDoDownload(async () => {
+                    await downloadAsMHTML('hw-note-printable', `${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
+                      appName: settings?.appShortName || settings?.appName || 'IIC',
+                      pageTitle: activePlayerHw.title || 'Homework MCQ',
+                      subtitle: 'Homework MCQs',
+                    });
                   });
-                  showAlert('📥 Saved offline!', 'SUCCESS');
+                  if (_dlOkHwMcq) showAlert('📥 Saved offline!', 'SUCCESS');
                 } catch (e) {
                   showAlert('Download failed. Please try again.', 'ERROR');
                 }
@@ -11233,6 +14980,21 @@ RULES:
                             >
                               <PlusCircle size={14} />
                             </button>
+                            <button
+                              onClick={() => {
+                                const mcq = chunk.mcq;
+                                if (!mcq?.question || !mcq?.options?.length) return;
+                                const opts = mcq.options.length === 4
+                                  ? mcq.options as [string,string,string,string]
+                                  : ([...mcq.options, '', '', '', ''].slice(0, 4) as [string,string,string,string]);
+                                setMcqCommunityDraft({ question: mcq.question, options: opts, correctAnswer: mcq.correctAnswer ?? 0, explanation: mcq.explanation || '' });
+                                setShowMcqCommunityPopup(true);
+                              }}
+                              className="shrink-0 p-2 rounded-full transition bg-violet-50 text-violet-700 hover:bg-violet-100"
+                              title="Community MCQ tab mein share karo"
+                            >
+                              <Send size={14} />
+                            </button>
                           </div>
                         </div>
                         <p className="text-base sm:text-lg font-bold text-slate-800 mb-3 leading-snug">
@@ -11262,6 +15024,8 @@ RULES:
                               if (!isInteractive) return;
                               if (userAnswered) return;
                               setPlayerMcqAnswers(prev => ({ ...prev, [idx]: oi }));
+                              // Track daily MCQ answer for prize system
+                              trackDailyMcqAnswer(isCorrect);
                             };
                             return (
                               <button
@@ -11470,38 +15234,49 @@ RULES:
       )}
 
       {/* ===================== NOTIFICATION TOAST ===================== */}
-      {notifToast && (
+
+      {/* Engagement reward → toast pointing to mail inbox (no full popup) */}
+      {notifToast && notifToast.type === 'reward' && (
         <div
           className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[9998] w-[92vw] max-w-sm pointer-events-auto"
           role="alert"
           aria-live="polite"
         >
-          <div className={`rounded-2xl shadow-2xl border p-4 flex items-start gap-3 animate-in slide-in-from-bottom-4 duration-300 ${
-            notifToast.type === 'reward'
-              ? 'bg-amber-50 border-amber-200 text-amber-900'
-              : 'bg-indigo-50 border-indigo-200 text-indigo-900'
-          }`}>
-            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-              notifToast.type === 'reward' ? 'bg-amber-200 text-amber-700' : 'bg-indigo-200 text-indigo-700'
-            }`}>
-              {notifToast.type === 'reward' ? <Gift size={18} /> : <Bell size={18} />}
+          <div className="rounded-2xl shadow-2xl border p-4 flex items-start gap-3 animate-in slide-in-from-bottom-4 duration-300 bg-amber-50 border-amber-200 text-amber-900">
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 bg-amber-200 text-amber-700">
+              <Gift size={18} />
             </div>
             <div className="flex-1 min-w-0">
               <p className="font-black text-sm leading-snug">{notifToast.title}</p>
               <p className="text-xs mt-0.5 opacity-80 leading-snug line-clamp-2">{notifToast.body}</p>
-              {notifToast.type === 'reward' && notifToast.rewardCredits && !claimedNotifIds.includes(notifToast.id) && (
-                <button
-                  onClick={() => {
-                    const ids = [...claimedNotifIds, notifToast.id];
-                    setClaimedNotifIds(ids);
-                    try { localStorage.setItem('nst_claimed_notifs_v1', JSON.stringify(ids)); } catch {}
-                    setNotifToast(null);
-                  }}
-                  className="mt-1.5 text-[10px] font-black bg-amber-500 text-white px-3 py-1 rounded-full"
-                >
-                  Claim {notifToast.rewardCredits} CR
-                </button>
-              )}
+              <button
+                onClick={() => { setInboxTab('REWARDS'); setShowInbox(true); setNotifToast(null); }}
+                className="mt-2 text-[11px] font-black bg-amber-500 text-white px-3 py-1 rounded-full flex items-center gap-1"
+              >
+                <Mail size={11} /> Mail → Rewards mein Claim karo
+              </button>
+            </div>
+            <button onClick={() => setNotifToast(null)} className="p-1 rounded-full hover:bg-black/10 shrink-0">
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Regular info notification → small toast */}
+      {notifToast && notifToast.type !== 'reward' && (
+        <div
+          className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[9998] w-[92vw] max-w-sm pointer-events-auto"
+          role="alert"
+          aria-live="polite"
+        >
+          <div className="rounded-2xl shadow-2xl border p-4 flex items-start gap-3 animate-in slide-in-from-bottom-4 duration-300 bg-indigo-50 border-indigo-200 text-indigo-900">
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 bg-indigo-200 text-indigo-700">
+              <Bell size={18} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="font-black text-sm leading-snug">{notifToast.title}</p>
+              <p className="text-xs mt-0.5 opacity-80 leading-snug line-clamp-2">{notifToast.body}</p>
             </div>
             <button
               onClick={() => setNotifToast(null)}
@@ -11639,38 +15414,45 @@ RULES:
                     : `${globalList.length} popular notes · Live community picks`}
                 </p>
               </div>
-              {/* Compact Trending / My Saved switch — replaces the old big tab pills.
-                  Lets the user open the Global ("Trending") page and come back. */}
-              <button
-                onClick={() => {
-                  stopProfileStarRead();
-                  setStarredPageTab(starredPageTab === 'mine' ? 'global' : 'mine');
-                }}
-                className="flex items-center gap-1 text-[10px] font-black text-white bg-white/20 hover:bg-white/30 px-2.5 py-1.5 rounded-xl backdrop-blur-sm border border-white/20 active:scale-95 transition-all"
-                title={starredPageTab === 'mine' ? 'Trending notes dekhein' : 'Apne saved notes par wapis jaayein'}
-              >
-                {starredPageTab === 'mine'
-                  ? <><TrendingUp size={12} /> Trending</>
-                  : <><Star size={12} className="fill-white text-white" /> My Saved</>
-                }
-              </button>
-              {starredPageTab === 'mine' && starredNotes.length > 0 && (
+              {/* Icon-only button group — same visual footprint on both tabs
+                  so the header stays the same height whether on Mine or Global. */}
+              <div className="flex items-center gap-1 shrink-0">
                 <button
                   onClick={() => {
-                    const ok = window.confirm(
-                      `${starredNotes.length} saved notes ko permanently delete karein?\n\nYe undo nahi ho sakta. Cancel karne ke liye No dabayein.`
-                    );
-                    if (!ok) return;
                     stopProfileStarRead();
-                    setStarredNotes([]);
-                    try { localStorage.removeItem('nst_starred_notes_v1'); } catch {}
-                    showAlert(`Sab ${starredNotes.length} saved notes delete ho gayi.`, 'SUCCESS');
+                    setStarredPageTab(starredPageTab === 'mine' ? 'global' : 'mine');
                   }}
-                  className="text-[10px] font-black text-white bg-red-500/80 hover:bg-red-600 px-2.5 py-1.5 rounded-xl backdrop-blur-sm border border-white/20 active:scale-95 transition-all"
+                  className="p-1.5 rounded-xl bg-white/20 hover:bg-white/30 text-white backdrop-blur-sm border border-white/20 active:scale-95 transition-all"
+                  title={starredPageTab === 'mine' ? 'Trending notes dekhein' : 'Apne saved notes par wapis jaayein'}
                 >
-                  Clear
+                  {starredPageTab === 'mine'
+                    ? <TrendingUp size={15} />
+                    : <Star size={15} className="fill-white text-white" />
+                  }
                 </button>
-              )}
+                {starredPageTab === 'mine' && starredNotes.length > 0 && (
+                  <button
+                    onClick={() => {
+                      const count = starredNotes.length;
+                      setConfirmDialog({
+                        isOpen: true,
+                        message: `${count} saved notes delete ho jaayenge. Ye wapis nahi aayenge.`,
+                        onConfirm: () => {
+                          stopProfileStarRead();
+                          setStarredNotes([]);
+                          try { localStorage.removeItem('nst_starred_notes_v1'); } catch {}
+                          showAlert(`Sab ${count} saved notes delete ho gayi.`, 'SUCCESS');
+                          setConfirmDialog(null);
+                        },
+                      });
+                    }}
+                    className="p-1.5 rounded-xl bg-red-500/70 hover:bg-red-600 text-white backdrop-blur-sm border border-white/20 active:scale-95 transition-all"
+                    title="Sab saved notes clear karein"
+                  >
+                    <X size={15} />
+                  </button>
+                )}
+              </div>
             </div>
 
           </div>
@@ -11806,7 +15588,39 @@ RULES:
                 <p className="text-xs text-slate-400 mt-1">Try a different keyword.</p>
               </div>
             ) : importantNotesView === 'list' ? (
-              filtered.map((note, idx) => {
+              (() => {
+                const _mb = groupStarredByBook(filtered).filter(b => b.total > 0);
+                const _mab = listViewBookFilter ? (_mb.find(b => b.lessonTitle === listViewBookFilter) ?? null) : null;
+                const _mChips = _mb.length > 1 ? (
+                  <div key="mine-chips" className="flex gap-2 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1">
+                    <button onClick={() => setListViewBookFilter(null)} className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-black border transition-all ${!listViewBookFilter ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm' : 'bg-white text-indigo-600 border-indigo-200 hover:border-indigo-400'}`}>All</button>
+                    {_mb.map(b => (
+                      <button key={b.lessonTitle} onClick={() => setListViewBookFilter(b.lessonTitle === listViewBookFilter ? null : b.lessonTitle)} className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-black border transition-all whitespace-nowrap ${listViewBookFilter === b.lessonTitle ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm' : 'bg-white text-indigo-600 border-indigo-200 hover:border-indigo-400'}`}>
+                        📖 {b.lessonTitle.length > 14 ? b.lessonTitle.slice(0,14)+'…' : b.lessonTitle} ({b.total})
+                      </button>
+                    ))}
+                  </div>
+                ) : null;
+                if (_mab) {
+                  return <>{_mChips}{_mab.pageList.map(pg => {
+                    const _pgLbl = pg.pageNo != null ? `Page ${pg.pageNo}` : pg.pageIndex != null ? `Page ${pg.pageIndex + 1}` : 'Untagged';
+                    return <div key={String(pg.pageNo ?? pg.pageIndex ?? 'n')} className="space-y-2">
+                      <div className="flex items-center gap-2 px-1 pt-1">
+                        <span className="text-[10px] font-black text-indigo-600 uppercase tracking-wider">📄 {_pgLbl}</span>
+                        <span className="flex-1 h-px bg-indigo-100" />
+                        <span className="text-[10px] font-bold text-amber-600">{pg.notes.length} ⭐</span>
+                      </div>
+                      {pg.notes.map(note => (
+                        <button key={note.id} type="button" onClick={() => setOpenNotePrompt({ topicText: note.topicText, source: note.source })} className="w-full text-left px-3 py-2.5 rounded-xl bg-white border border-amber-200 hover:border-amber-400 hover:bg-amber-50 active:scale-[0.99] transition-all flex items-start gap-2 shadow-sm">
+                          <Star size={12} className="fill-amber-500 text-amber-500 shrink-0 mt-0.5" />
+                          <span className="font-semibold text-[12px] text-slate-700 leading-snug flex-1">{note.topicText}</span>
+                          {note.source && <ChevronRight size={12} className="text-indigo-400 shrink-0 mt-1" />}
+                        </button>
+                      ))}
+                    </div>;
+                  })}</>;
+                }
+                const _mList = filtered.map((note, idx) => {
                 const isCurrentlyReading = isReadingProfileStars && readingProfileStarIdx === idx;
                 const socialCount = getNoteStarCount(note.topicText);
                 const src = note.source;
@@ -11888,10 +15702,12 @@ RULES:
                             wrapper.style.left = '-9999px';
                             document.body.appendChild(wrapper);
                             const safeTitle = note.topicText.slice(0,40).replace(/[^a-z0-9]+/gi,'_');
-                            await downloadAsMHTML('imp-note-printable', `Important_${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
-                              appName: settings?.appShortName || settings?.appName || 'IIC',
-                              pageTitle: `Important · ${note.topicText.slice(0, 60)}`,
-                              subtitle: 'Important Notes',
+                            await checkAndDoDownload(async () => {
+                              await downloadAsMHTML('imp-note-printable', `Important_${safeTitle}_${new Date().toISOString().slice(0,10)}`, {
+                                appName: settings?.appShortName || settings?.appName || 'IIC',
+                                pageTitle: `Important · ${note.topicText.slice(0, 60)}`,
+                                subtitle: 'Important Notes',
+                              });
                             });
                             setTimeout(() => { try { document.body.removeChild(wrapper); } catch {} }, 500);
                           } catch (err) { console.error(err); }
@@ -11942,7 +15758,9 @@ RULES:
                     </div>
                   </div>
                 );
-              })
+              });
+              return <>{_mChips}{_mList}</>;
+              })()
             ) : (
               // === BY BOOK / PAGE drill-down view ===
               (() => {
@@ -11982,107 +15800,66 @@ RULES:
                   );
                 }
 
-                // LEVEL 1 — Page picker for selected book
-                if (!activePage) {
-                  return (
-                    <>
-                      {/* Breadcrumb */}
-                      <div className="flex items-center gap-2 text-[11px] font-black text-indigo-700 px-1">
-                        <button
-                          onClick={() => { setDrillBookKey(null); setDrillPageKey(null); }}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200"
-                        >
-                          <ChevronLeft size={12} /> Books
-                        </button>
-                        <span className="text-indigo-300">/</span>
-                        <span className="truncate">{activeBook.lessonTitle}</span>
-                      </div>
-                      <div className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white shadow-sm overflow-hidden">
-                        <div className="px-4 py-3 bg-indigo-100/60 border-b border-indigo-200 flex items-center gap-2">
-                          <div className="w-9 h-9 rounded-xl bg-indigo-500 text-white flex items-center justify-center shrink-0 shadow-sm">
-                            <BookOpen size={16} />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="font-black text-sm text-indigo-900 leading-tight truncate">{activeBook.lessonTitle}</p>
-                            <p className="text-[10px] text-indigo-600 font-bold tracking-wide">
-                              {activeBook.subject ? `${activeBook.subject} · ` : ''}{activeBook.total} important note{activeBook.total !== 1 ? 's' : ''} · {activeBook.pageList.length} page{activeBook.pageList.length !== 1 ? 's' : ''}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="p-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
-                          {activeBook.pageList.map(pg => {
-                            const pgKey = `${pg.pageNo ?? pg.pageIndex ?? 'n'}`;
-                            const pgLabel = pg.pageNo != null ? `Page ${pg.pageNo}` :
-                              pg.pageIndex != null ? `Page ${pg.pageIndex + 1}` : 'Untagged';
-                            return (
-                              <button
-                                key={pgKey}
-                                type="button"
-                                onClick={() => setDrillPageKey(pgKey)}
-                                className="rounded-xl border-2 border-indigo-100 bg-white hover:border-indigo-400 hover:bg-indigo-50 active:scale-95 transition-all p-3 text-center"
-                              >
-                                <div className="text-[10px] font-black text-indigo-500 uppercase tracking-wider">📄</div>
-                                <div className="font-black text-sm text-indigo-900 mt-0.5 truncate">{pgLabel}</div>
-                                <div className="text-[10px] font-bold text-amber-600 mt-0.5">
-                                  {pg.notes.length} ⭐ note{pg.notes.length !== 1 ? 's' : ''}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </>
-                  );
-                }
-
-                // LEVEL 2 — Notes of selected page (page-wise arranged)
-                const pgLabel = activePage.pageNo != null ? `Page ${activePage.pageNo}` :
-                  activePage.pageIndex != null ? `Page ${activePage.pageIndex + 1}` : 'Untagged';
+                // LEVEL 1 — All pages expanded with notes (no extra tap needed)
                 return (
                   <>
                     {/* Breadcrumb */}
-                    <div className="flex items-center gap-1.5 text-[11px] font-black text-indigo-700 px-1 flex-wrap">
+                    <div className="flex items-center gap-2 text-[11px] font-black text-indigo-700 px-1">
                       <button
                         onClick={() => { setDrillBookKey(null); setDrillPageKey(null); }}
-                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 active:scale-95 transition-all"
                       >
                         <ChevronLeft size={12} /> Books
                       </button>
                       <span className="text-indigo-300">/</span>
-                      <button
-                        onClick={() => setDrillPageKey(null)}
-                        className="px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 truncate max-w-[40%]"
-                      >
-                        {activeBook.lessonTitle}
-                      </button>
-                      <span className="text-indigo-300">/</span>
-                      <span className="truncate">{pgLabel}</span>
+                      <span className="truncate max-w-[55%]">{activeBook.lessonTitle}</span>
                     </div>
+                    {/* Book header */}
                     <div className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white shadow-sm overflow-hidden">
-                      <div className="px-4 py-3 bg-indigo-100/60 border-b border-indigo-200 flex items-center gap-2">
-                        <div className="w-9 h-9 rounded-xl bg-indigo-500 text-white flex items-center justify-center shrink-0 shadow-sm font-black text-xs">
-                          📄
+                      <div className="px-4 py-3 bg-indigo-500 flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-white/20 text-white flex items-center justify-center shrink-0 shadow-sm">
+                          <BookOpen size={18} />
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="font-black text-sm text-indigo-900 leading-tight truncate">{pgLabel}</p>
-                          <p className="text-[10px] text-indigo-600 font-bold tracking-wide truncate">
-                            {activeBook.lessonTitle} · {activePage.notes.length} note{activePage.notes.length !== 1 ? 's' : ''}
+                          <p className="font-black text-sm text-white leading-tight truncate">{activeBook.lessonTitle}</p>
+                          <p className="text-[10px] text-indigo-200 font-bold tracking-wide mt-0.5">
+                            {activeBook.subject ? `${activeBook.subject} · ` : ''}{activeBook.total} note{activeBook.total !== 1 ? 's' : ''} · {activeBook.pageList.length} page{activeBook.pageList.length !== 1 ? 's' : ''}
                           </p>
                         </div>
                       </div>
-                      <div className="p-3 space-y-1.5">
-                        {activePage.notes.map(note => (
-                          <button
-                            key={note.id}
-                            type="button"
-                            onClick={() => setOpenNotePrompt({ topicText: note.topicText, source: note.source })}
-                            className="w-full text-left px-3 py-2.5 rounded-xl bg-white border border-indigo-100 hover:border-indigo-300 hover:bg-indigo-50/50 active:scale-[0.99] transition-all flex items-start gap-2"
-                          >
-                            <Star size={12} className="fill-amber-500 text-amber-500 shrink-0 mt-0.5" />
-                            <span className="font-semibold text-[12px] text-slate-700 leading-snug flex-1">{note.topicText}</span>
-                            <ChevronRight size={12} className="text-indigo-400 shrink-0 mt-1" />
-                          </button>
-                        ))}
+                      {/* Pages expanded inline */}
+                      <div className="divide-y divide-indigo-50">
+                        {activeBook.pageList.map(pg => {
+                          const pgLabel = pg.pageNo != null ? `Page ${pg.pageNo}` :
+                            pg.pageIndex != null ? `Page ${pg.pageIndex + 1}` : 'Untagged';
+                          return (
+                            <div key={String(pg.pageNo ?? pg.pageIndex ?? 'nopage')}>
+                              {/* Page number header row */}
+                              <div className="flex items-center gap-2 px-4 py-2 bg-indigo-50/70">
+                                <div className="w-6 h-6 rounded-lg bg-indigo-500 text-white flex items-center justify-center shrink-0 shadow-sm">
+                                  <span className="text-[9px] font-black">P</span>
+                                </div>
+                                <span className="font-black text-[11px] text-indigo-800 uppercase tracking-wider flex-1">{pgLabel}</span>
+                                <span className="text-[10px] font-bold text-amber-600 shrink-0">{pg.notes.length} ⭐</span>
+                              </div>
+                              {/* Notes under this page */}
+                              <div className="px-3 py-2 space-y-1.5">
+                                {pg.notes.map(note => (
+                                  <button
+                                    key={note.id}
+                                    type="button"
+                                    onClick={() => setOpenNotePrompt({ topicText: note.topicText, source: note.source })}
+                                    className="w-full text-left px-3 py-2.5 rounded-xl bg-white border border-indigo-100 hover:border-indigo-300 hover:bg-indigo-50/60 active:scale-[0.99] transition-all flex items-start gap-2 shadow-sm"
+                                  >
+                                    <Star size={11} className="fill-amber-500 text-amber-500 shrink-0 mt-0.5" />
+                                    <span className="font-semibold text-[12px] text-slate-700 leading-snug flex-1">{note.topicText}</span>
+                                    <ChevronRight size={11} className="text-indigo-300 shrink-0 mt-0.5" />
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   </>
@@ -12238,110 +16015,115 @@ RULES:
                   );
                 }
 
-                if (!activePage) {
-                  return (
-                    <>
-                      <div className="flex items-center gap-2 text-[11px] font-black text-indigo-700 px-1">
-                        <button
-                          onClick={() => { setDrillBookKey(null); setDrillPageKey(null); }}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200"
-                        >
-                          <ChevronLeft size={12} /> Books
-                        </button>
-                        <span className="text-indigo-300">/</span>
-                        <span className="truncate">{activeBook.lessonTitle}</span>
-                      </div>
-                      <div className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white shadow-sm overflow-hidden">
-                        <div className="px-4 py-3 bg-indigo-100/60 border-b border-indigo-200 flex items-center gap-2">
-                          <div className="w-9 h-9 rounded-xl bg-indigo-500 text-white flex items-center justify-center shrink-0 shadow-sm">
-                            <BookOpen size={16} />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="font-black text-sm text-indigo-900 leading-tight truncate">{activeBook.lessonTitle}</p>
-                            <p className="text-[10px] text-indigo-600 font-bold tracking-wide">
-                              {activeBook.subject ? `${activeBook.subject} · ` : ''}{activeBook.total} global note{activeBook.total !== 1 ? 's' : ''} · {activeBook.pageList.length} page{activeBook.pageList.length !== 1 ? 's' : ''}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="p-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
-                          {activeBook.pageList.map(pg => {
-                            const pgKey = `${pg.pageNo ?? pg.pageIndex ?? 'n'}`;
-                            const pgLabel = pg.pageNo != null ? `Page ${pg.pageNo}` :
-                              pg.pageIndex != null ? `Page ${pg.pageIndex + 1}` : 'Untagged';
-                            return (
-                              <button
-                                key={pgKey}
-                                type="button"
-                                onClick={() => setDrillPageKey(pgKey)}
-                                className="rounded-xl border-2 border-indigo-100 bg-white hover:border-indigo-400 hover:bg-indigo-50 active:scale-95 transition-all p-3 text-center"
-                              >
-                                <div className="text-[10px] font-black text-indigo-500 uppercase tracking-wider">📄</div>
-                                <div className="font-black text-sm text-indigo-900 mt-0.5 truncate">{pgLabel}</div>
-                                <div className="text-[10px] font-bold text-amber-600 mt-0.5">
-                                  {pg.notes.length} ⭐ note{pg.notes.length !== 1 ? 's' : ''}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </>
-                  );
-                }
-
-                const pgLabel = activePage.pageNo != null ? `Page ${activePage.pageNo}` :
-                  activePage.pageIndex != null ? `Page ${activePage.pageIndex + 1}` : 'Untagged';
+                // All pages expanded inline — no extra tap needed
                 return (
                   <>
-                    <div className="flex items-center gap-1.5 text-[11px] font-black text-indigo-700 px-1 flex-wrap">
+                    <div className="flex items-center gap-2 text-[11px] font-black text-indigo-700 px-1">
                       <button
                         onClick={() => { setDrillBookKey(null); setDrillPageKey(null); }}
-                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 active:scale-95 transition-all"
                       >
                         <ChevronLeft size={12} /> Books
                       </button>
                       <span className="text-indigo-300">/</span>
-                      <button
-                        onClick={() => setDrillPageKey(null)}
-                        className="px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 truncate max-w-[40%]"
-                      >
-                        {activeBook.lessonTitle}
-                      </button>
-                      <span className="text-indigo-300">/</span>
-                      <span className="truncate">{pgLabel}</span>
+                      <span className="truncate max-w-[55%]">{activeBook.lessonTitle}</span>
                     </div>
                     <div className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white shadow-sm overflow-hidden">
-                      <div className="px-4 py-3 bg-indigo-100/60 border-b border-indigo-200 flex items-center gap-2">
-                        <div className="w-9 h-9 rounded-xl bg-indigo-500 text-white flex items-center justify-center shrink-0 shadow-sm font-black text-xs">
-                          📄
+                      <div className="px-4 py-3 bg-indigo-500 flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-white/20 text-white flex items-center justify-center shrink-0 shadow-sm">
+                          <BookOpen size={18} />
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="font-black text-sm text-indigo-900 leading-tight truncate">{pgLabel}</p>
-                          <p className="text-[10px] text-indigo-600 font-bold tracking-wide truncate">
-                            {activeBook.lessonTitle} · {activePage.notes.length} note{activePage.notes.length !== 1 ? 's' : ''}
+                          <p className="font-black text-sm text-white leading-tight truncate">{activeBook.lessonTitle}</p>
+                          <p className="text-[10px] text-indigo-200 font-bold tracking-wide mt-0.5">
+                            {activeBook.subject ? `${activeBook.subject} · ` : ''}{activeBook.total} global note{activeBook.total !== 1 ? 's' : ''} · {activeBook.pageList.length} page{activeBook.pageList.length !== 1 ? 's' : ''}
                           </p>
                         </div>
                       </div>
-                      <div className="p-3 space-y-1.5">
-                        {activePage.notes.map(note => (
-                          <button
-                            key={note.id}
-                            type="button"
-                            onClick={() => note.source ? setOpenNotePrompt({ topicText: note.topicText, source: note.source }) : undefined}
-                            className="w-full text-left px-3 py-2.5 rounded-xl bg-white border border-indigo-100 hover:border-indigo-300 hover:bg-indigo-50/50 active:scale-[0.99] transition-all flex items-start gap-2"
-                          >
-                            <Star size={12} className="fill-amber-500 text-amber-500 shrink-0 mt-0.5" />
-                            <span className="font-semibold text-[12px] text-slate-700 leading-snug flex-1">{note.topicText}</span>
-                            {note.source ? <ChevronRight size={12} className="text-indigo-400 shrink-0 mt-1" /> : null}
-                          </button>
-                        ))}
+                      <div className="divide-y divide-indigo-50">
+                        {activeBook.pageList.map(pg => {
+                          const pgLabel = pg.pageNo != null ? `Page ${pg.pageNo}` :
+                            pg.pageIndex != null ? `Page ${pg.pageIndex + 1}` : 'Untagged';
+                          return (
+                            <div key={String(pg.pageNo ?? pg.pageIndex ?? 'nopage')}>
+                              <div className="flex items-center gap-2 px-4 py-2 bg-indigo-50/70">
+                                <div className="w-6 h-6 rounded-lg bg-indigo-500 text-white flex items-center justify-center shrink-0 shadow-sm">
+                                  <span className="text-[9px] font-black">P</span>
+                                </div>
+                                <span className="font-black text-[11px] text-indigo-800 uppercase tracking-wider flex-1">{pgLabel}</span>
+                                <span className="text-[10px] font-bold text-amber-600 shrink-0">{pg.notes.length} ⭐</span>
+                              </div>
+                              <div className="px-3 py-2 space-y-1.5">
+                                {pg.notes.map(note => (
+                                  <button
+                                    key={note.id}
+                                    type="button"
+                                    onClick={() => note.source ? setOpenNotePrompt({ topicText: note.topicText, source: note.source }) : undefined}
+                                    className="w-full text-left px-3 py-2.5 rounded-xl bg-white border border-indigo-100 hover:border-indigo-300 hover:bg-indigo-50/60 active:scale-[0.99] transition-all flex items-start gap-2 shadow-sm"
+                                  >
+                                    <Star size={11} className="fill-amber-500 text-amber-500 shrink-0 mt-0.5" />
+                                    <span className="font-semibold text-[12px] text-slate-700 leading-snug flex-1">{note.topicText}</span>
+                                    {note.source ? <ChevronRight size={11} className="text-indigo-300 shrink-0 mt-0.5" /> : null}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   </>
                 );
               })()
             ) : (
-              globalList.map((entry, idx) => {
+              (() => {
+                const _gnorm = (s: string) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+                const _glbt = new Map<string, StarredNote>();
+                const _glbp = new Map<string, StarredNote>();
+                for (const n of starredNotes) {
+                  const k = _gnorm(n.topicText || '');
+                  if (!k) continue;
+                  if (!_glbt.has(k)) _glbt.set(k, n);
+                  const pre = k.slice(0, 140);
+                  if (!_glbp.has(pre)) _glbp.set(pre, n);
+                }
+                const _gsyn: StarredNote[] = globalList.map(entry => {
+                  const ln = _gnorm(entry.label);
+                  const mine = _glbt.get(ln) || _glbp.get(ln.slice(0, 140));
+                  const src = entry.source || mine?.source;
+                  return { id: `global_${entry.hash || entry.label}`, topicText: entry.label, savedAt: mine?.savedAt || 0, source: src } as StarredNote;
+                });
+                const _gb = groupStarredByBook(_gsyn).filter(b => b.total > 0);
+                const _gab = listViewBookFilter ? (_gb.find(b => b.lessonTitle === listViewBookFilter) ?? null) : null;
+                const _gChips = _gb.length > 1 ? (
+                  <div key="global-chips" className="flex gap-2 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1">
+                    <button onClick={() => setListViewBookFilter(null)} className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-black border transition-all ${!listViewBookFilter ? 'bg-amber-500 text-white border-amber-500 shadow-sm' : 'bg-white text-amber-600 border-amber-200 hover:border-amber-400'}`}>All</button>
+                    {_gb.map(b => (
+                      <button key={b.lessonTitle} onClick={() => setListViewBookFilter(b.lessonTitle === listViewBookFilter ? null : b.lessonTitle)} className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-black border transition-all whitespace-nowrap ${listViewBookFilter === b.lessonTitle ? 'bg-amber-500 text-white border-amber-500 shadow-sm' : 'bg-white text-amber-600 border-amber-200 hover:border-amber-400'}`}>
+                        📖 {b.lessonTitle.length > 14 ? b.lessonTitle.slice(0,14)+'…' : b.lessonTitle} ({b.total})
+                      </button>
+                    ))}
+                  </div>
+                ) : null;
+                if (_gab) {
+                  return <>{_gChips}{_gab.pageList.map(pg => {
+                    const _gpLbl = pg.pageNo != null ? `Page ${pg.pageNo}` : pg.pageIndex != null ? `Page ${pg.pageIndex + 1}` : 'Untagged';
+                    return <div key={String(pg.pageNo ?? pg.pageIndex ?? 'n')} className="space-y-2">
+                      <div className="flex items-center gap-2 px-1 pt-1">
+                        <span className="text-[10px] font-black text-amber-600 uppercase tracking-wider">📄 {_gpLbl}</span>
+                        <span className="flex-1 h-px bg-amber-100" />
+                        <span className="text-[10px] font-bold text-amber-600">{pg.notes.length} ⭐</span>
+                      </div>
+                      {pg.notes.map(note => (
+                        <button key={note.id} type="button" onClick={() => setOpenNotePrompt({ topicText: note.topicText, source: note.source })} className="w-full text-left px-3 py-2.5 rounded-xl bg-white border border-amber-200 hover:border-amber-400 hover:bg-amber-50 active:scale-[0.99] transition-all flex items-start gap-2 shadow-sm">
+                          <Star size={12} className="fill-amber-500 text-amber-500 shrink-0 mt-0.5" />
+                          <span className="font-semibold text-[12px] text-slate-700 leading-snug flex-1">{note.topicText}</span>
+                        </button>
+                      ))}
+                    </div>;
+                  })}</>;
+                }
+                const _gList = globalList.map((entry, idx) => {
                 const minePulled = starredNotes.find(n => n.topicText === entry.label);
                 const isMine = !!minePulled;
                 const pct = globalTopCount > 0 ? Math.max(6, Math.round((entry.displayCount / globalTopCount) * 100)) : 0;
@@ -12457,7 +16239,9 @@ RULES:
                     </div>
                   </div>
                 );
-              })
+              });
+              return <>{_gChips}{_gList}</>;
+              })()
             )}
           </>)}
 
@@ -12631,77 +16415,698 @@ RULES:
                       : <>"All Time" tab might have older trending notes —<br/>shayad purane trending notes mil jaaye.</>}
                   </p>
                 </div>
-              ) : (
-                ranked.map((entry, idx) => {
-                  const pct = topCount > 0 ? Math.max(8, Math.round((entry.displayCount / topCount) * 100)) : 0;
-                  const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
-                  const isCurrentlyReading = isReadingProfileStars && readingProfileStarIdx === idx;
-                  return (
-                    <div
-                      key={entry.hash}
-                      className={`rounded-2xl p-3.5 border shadow-sm flex items-start gap-3 transition-all ${
-                        isCurrentlyReading
-                          ? 'bg-amber-100 border-amber-400 ring-2 ring-amber-200'
-                          : 'bg-white border-amber-200'
-                      }`}
-                    >
-                      {/* Per-card speaker — tap reads from this note onwards */}
+              ) : (() => {
+                const displayedRanked = showAllTrending ? ranked : ranked.slice(0, 5);
+                return (
+                  <>
+                    {displayedRanked.map((entry, idx) => {
+                      const pct = topCount > 0 ? Math.max(8, Math.round((entry.displayCount / topCount) * 100)) : 0;
+                      const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
+                      const isCurrentlyReading = isReadingProfileStars && readingProfileStarIdx === idx;
+                      return (
+                        <div
+                          key={entry.hash}
+                          className={`rounded-2xl p-3.5 border shadow-sm flex items-start gap-3 transition-all ${
+                            isCurrentlyReading
+                              ? 'bg-amber-100 border-amber-400 ring-2 ring-amber-200'
+                              : 'bg-white border-amber-200'
+                          }`}
+                        >
+                          <button
+                            onClick={() => {
+                              if (isCurrentlyReading) {
+                                stopProfileStarRead();
+                              } else {
+                                startProfileStarRead(ranked.slice(idx).map(e => ({ topicText: e.label })));
+                              }
+                            }}
+                            title={isCurrentlyReading ? 'Stop reading' : 'Read from here'}
+                            aria-label={isCurrentlyReading ? 'Stop reading' : 'Read this note'}
+                            className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-all ${
+                              isCurrentlyReading
+                                ? 'bg-amber-400 text-white animate-pulse'
+                                : 'bg-amber-100 text-amber-600 hover:bg-amber-200'
+                            }`}
+                          >
+                            {isCurrentlyReading ? <Square size={14} fill="currentColor" /> : <Volume2 size={14} />}
+                          </button>
+                          <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 font-black text-sm ${
+                            idx < 3 ? 'bg-gradient-to-br from-amber-400 to-orange-500 text-white shadow-md' : 'bg-amber-50 text-amber-700 border border-amber-200'
+                          }`}>
+                            {medal}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-bold text-sm text-slate-800 leading-snug line-clamp-3">{entry.label}</p>
+                            <div className="mt-2 flex items-center gap-2">
+                              <div className="flex-1 h-1.5 bg-amber-100 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-gradient-to-r from-amber-400 to-orange-500 rounded-full transition-all duration-700"
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                              <span className="text-[11px] font-black text-amber-700 shrink-0 inline-flex items-center gap-1">
+                                <Star size={10} className="fill-amber-500 text-amber-500" />
+                                {entry.displayCount.toLocaleString('en-IN')}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {ranked.length > 5 && (
                       <button
-                        onClick={() => {
-                          if (isCurrentlyReading) {
-                            stopProfileStarRead();
-                          } else {
-                            startProfileStarRead(ranked.slice(idx).map(e => ({ topicText: e.label })));
-                          }
-                        }}
-                        title={isCurrentlyReading ? 'Stop reading' : 'Read from here'}
-                        aria-label={isCurrentlyReading ? 'Stop reading' : 'Read this note'}
-                        className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-all ${
-                          isCurrentlyReading
-                            ? 'bg-amber-400 text-white animate-pulse'
-                            : 'bg-amber-100 text-amber-600 hover:bg-amber-200'
-                        }`}
+                        onClick={() => setShowAllTrending(v => !v)}
+                        className="w-full py-3 rounded-2xl border-2 border-amber-200 bg-amber-50 text-amber-700 font-black text-sm flex items-center justify-center gap-2 active:scale-95 transition-all hover:bg-amber-100"
                       >
-                        {isCurrentlyReading
-                          ? <Square size={14} fill="currentColor" />
-                          : <Volume2 size={14} />
+                        {showAllTrending
+                          ? <><ChevronUp size={16} /> Top 5 dikhao</>
+                          : <><ChevronDown size={16} /> Sab {ranked.length} dekho</>
                         }
                       </button>
-                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 font-black text-sm ${
-                        idx < 3 ? 'bg-gradient-to-br from-amber-400 to-orange-500 text-white shadow-md' : 'bg-amber-50 text-amber-700 border border-amber-200'
-                      }`}>
-                        {medal}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-bold text-sm text-slate-800 leading-snug line-clamp-3">
-                          {entry.label}
-                        </p>
-                        <div className="mt-2 flex items-center gap-2">
-                          <div className="flex-1 h-1.5 bg-amber-100 rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-gradient-to-r from-amber-400 to-orange-500 rounded-full transition-all duration-700"
-                              style={{ width: `${pct}%` }}
-                            />
-                          </div>
-                          <span className="text-[11px] font-black text-amber-700 shrink-0 inline-flex items-center gap-1">
-                            <Star size={10} className="fill-amber-500 text-amber-500" />
-                            {entry.displayCount.toLocaleString('en-IN')}
-                          </span>
-                        </div>
-                      </div>
+                    )}
+                    {ranked.length > 0 && (
+                      <p className="text-center text-[10px] font-bold text-amber-500 pt-1 pb-6">
+                        Aap akele nahi padh rahe — poori community saath padh rahi hai 🌟
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* FLOATING APP LOGO BUTTON — Har screen pe hamesha visible. Tapping focus mode toggle karta hai. Draggable. */}
+      {!activeExternalApp && !hwActiveHwId && !(contentViewStep === 'PLAYER' && selectedChapter) && (
+        <button
+          ref={floatLogoBtnRef}
+          onClick={() => { if (!floatLogoMoved.current) setIsLandscapeUiHidden(prev => { const next = !prev; setIsTopBarHidden(next); return next; }); }}
+          className="fixed z-[9200] shadow-2xl"
+          style={{
+            ...(floatLogoPos
+              ? { left: floatLogoPos.x, top: floatLogoPos.y, bottom: 'auto', right: 'auto' }
+              : { bottom: (isLandscapeUiHidden || (contentViewStep === "PLAYER" && !!selectedChapter)) ? '16px' : '80px', right: '16px' }),
+            width: '56px',
+            height: '56px',
+            borderRadius: '50%',
+            overflow: 'hidden',
+            border: isLandscapeUiHidden ? '2.5px solid rgba(99,102,241,0.9)' : '2.5px solid rgba(255,255,255,0.5)',
+            background: isLandscapeUiHidden ? 'rgba(30,27,75,0.95)' : 'rgba(15,23,42,0.88)',
+            backdropFilter: 'blur(10px)',
+            touchAction: 'none',
+            userSelect: 'none',
+            cursor: 'grab',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+          title={isLandscapeUiHidden ? 'Show top bar & navigation' : 'Hide top bar & navigation'}
+        >
+          {settings?.appLogo ? (
+            <img
+              src={settings.appLogo}
+              alt="App"
+              style={{ width: '42px', height: '42px', objectFit: 'contain', borderRadius: '50%', pointerEvents: 'none' }}
+            />
+          ) : (
+            <span style={{ fontSize: '20px', fontWeight: 900, color: '#fff', letterSpacing: '-0.5px', pointerEvents: 'none' }}>
+              {(settings?.appShortName || settings?.appName || 'A').charAt(0)}
+            </span>
+          )}
+          {/* Focus mode indicator dot */}
+          <span
+            style={{
+              position: 'absolute',
+              top: '3px',
+              right: '3px',
+              width: '11px',
+              height: '11px',
+              borderRadius: '50%',
+              background: isLandscapeUiHidden ? '#6366f1' : '#22c55e',
+              border: '2px solid #fff',
+              pointerEvents: 'none',
+            }}
+          />
+        </button>
+      )}
+
+      {/* ═══════════ FEATURE LIMITS & DAILY USAGE MODAL ═══════════ */}
+      {showFeatureLimitsModal && (() => {
+        const isUltra = user.isPremium && user.subscriptionLevel === 'ULTRA';
+        const isBasic = user.isPremium && user.subscriptionLevel === 'BASIC';
+        const isFree = !user.isPremium;
+        const tierLabel = isUltra ? 'Ultra ⚡' : isBasic ? 'Basic 🔵' : 'Free 🆓';
+        const tierColor = isUltra ? 'from-violet-500 to-purple-600' : isBasic ? 'from-sky-500 to-blue-600' : 'from-slate-400 to-slate-500';
+        const todayStr = new Date().toISOString().split('T')[0];
+
+        const mcqToday = parseInt(localStorage.getItem(`nst_mcq_daily_total_${todayStr}_${user.id}`) || '0', 10);
+        const htmlSessions = parseInt(localStorage.getItem(`nst_basic_html_${user.id}_${todayStr}`) || '0', 10);
+        const storeVisits = parseInt(localStorage.getItem(`nst_store_visits_${user.id}_${todayStr}`) || '0', 10);
+        const dlHtmlToday = parseInt(localStorage.getItem(`nst_dl_html_${user.id}_${todayStr}`) || '0', 10);
+
+        const htmlCost = settings?.htmlUnlockCost ?? 5;
+        const basicHtmlLimit = settings?.basicHtmlDailyLimit ?? 3;
+        const basicHtmlLeft = Math.max(0, basicHtmlLimit - htmlSessions);
+
+        const mcqLimit = isUltra ? null : isBasic ? null : 50;
+        const mcqLeft = mcqLimit !== null ? Math.max(0, mcqLimit - mcqToday) : null;
+
+        const dlLimit = isUltra ? (settings?.htmlDownloadLimitUltra ?? 10) : isBasic ? (settings?.htmlDownloadLimitBasic ?? 5) : (settings?.htmlDownloadLimitFree ?? 2);
+        const dlLeft  = Math.max(0, dlLimit - dlHtmlToday);
+
+        type LimitRow = { icon: string; label: string; limit: string; used: string; statusColor: string };
+        const rows: LimitRow[] = [
+          {
+            icon: '📝',
+            label: 'MCQ Practice',
+            limit: mcqLimit !== null ? `${mcqLimit}/day` : 'Unlimited',
+            used: `${mcqToday} done${mcqLeft !== null ? ` · ${mcqLeft} left` : ''}`,
+            statusColor: mcqLeft === 0 ? 'text-rose-600' : mcqLeft !== null && mcqLeft <= 10 ? 'text-amber-600' : 'text-emerald-600',
+          },
+          {
+            icon: '📥',
+            label: 'HTML Downloads',
+            limit: `${dlLimit}/day`,
+            used: `${dlHtmlToday} done · ${dlLeft} left`,
+            statusColor: dlLeft === 0 ? 'text-rose-600' : dlLeft <= 2 ? 'text-amber-600' : 'text-emerald-600',
+          },
+          {
+            icon: '✍️',
+            label: 'HTML Write View',
+            limit: isUltra ? 'Unlimited' : isBasic ? `${basicHtmlLimit}/day` : 'Ultra only',
+            used: isUltra ? 'Free always' : isBasic ? `${htmlSessions} used · ${basicHtmlLeft} left` : 'Upgrade needed',
+            statusColor: isUltra ? 'text-emerald-600' : isBasic ? (basicHtmlLeft === 0 ? 'text-rose-600' : 'text-sky-600') : 'text-rose-600',
+          },
+          {
+            icon: '📖',
+            label: 'Notes Reading',
+            limit: 'Unlimited',
+            used: 'No daily cap',
+            statusColor: 'text-emerald-600',
+          },
+          {
+            icon: '🎬',
+            label: 'Video Lectures',
+            limit: isUltra ? `${settings?.videoFreeLimitUltra ?? 10}/day free` : isBasic ? `${settings?.videoFreeLimitBasic ?? 5}/day free` : 'Coins needed',
+            used: isUltra ? 'Phir coins lagenge' : isBasic ? 'Phir coins lagenge' : `${settings?.defaultVideoCost ?? 10} CR each`,
+            statusColor: isUltra || isBasic ? 'text-emerald-600' : 'text-amber-600',
+          },
+          {
+            icon: '🔊',
+            label: 'Audio / TTS',
+            limit: 'Unlimited',
+            used: 'No daily cap',
+            statusColor: 'text-emerald-600',
+          },
+          {
+            icon: '📄',
+            label: 'PDF / Notes Access',
+            limit: isUltra ? `${settings?.pdfFreeLimitUltra ?? 10}/day free` : isBasic ? `${settings?.pdfFreeLimitBasic ?? 5}/day free` : 'Coins needed',
+            used: isUltra ? 'Free then coins' : isBasic ? 'Free then coins' : `${settings?.defaultPdfCost ?? 5} CR each`,
+            statusColor: isUltra || isBasic ? 'text-emerald-600' : 'text-amber-600',
+          },
+          {
+            icon: '🏬',
+            label: 'Store Visits Today',
+            limit: 'Unlimited',
+            used: `${storeVisits} visits`,
+            statusColor: 'text-slate-600',
+          },
+          {
+            icon: '💰',
+            label: 'Credits Balance',
+            limit: 'Earn daily',
+            used: `${user.credits || 0} CR available`,
+            statusColor: (user.credits||0) >= 20 ? 'text-emerald-600' : (user.credits||0) > 0 ? 'text-amber-600' : 'text-rose-600',
+          },
+        ];
+
+        return (
+          <div className="fixed inset-0 z-[9999] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(6px)' }} onClick={() => setShowFeatureLimitsModal(false)}>
+            <div className="bg-white rounded-t-3xl w-full max-w-lg max-h-[85vh] flex flex-col animate-in slide-in-from-bottom-10 duration-200" onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-slate-100">
+                <div>
+                  <h2 className="text-base font-black text-slate-800">Daily Limits & Usage</h2>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Aaj ka usage aur aapki plan ki limits</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] font-black px-3 py-1 rounded-full text-white bg-gradient-to-r ${tierColor}`}>{tierLabel}</span>
+                  <button onClick={() => setShowFeatureLimitsModal(false)} className="p-1.5 rounded-full bg-slate-100 text-slate-500">✕</button>
+                </div>
+              </div>
+              {/* Rows */}
+              <div className="overflow-y-auto flex-1 divide-y divide-slate-100 pb-2">
+                {rows.map((row, i) => (
+                  <div key={i} className="px-5 py-3 flex items-center gap-3">
+                    <span className="text-xl shrink-0">{row.icon}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[12px] font-black text-slate-700 leading-tight">{row.label}</p>
+                      <p className={`text-[10px] font-bold mt-0.5 ${row.statusColor}`}>{row.used}</p>
                     </div>
-                  );
-                })
-              )}
-              {ranked.length > 0 && (
-                <p className="text-center text-[10px] font-bold text-amber-500 pt-3 pb-6">
-                  Aap akele nahi padh rahe — poori community saath padh rahi hai 🌟
-                </p>
+                    <span className="shrink-0 text-[9px] font-black text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full whitespace-nowrap">{row.limit}</span>
+                  </div>
+                ))}
+              </div>
+              {/* Footer */}
+              {!isUltra && (
+                <div className="px-5 py-4 border-t border-slate-100">
+                  <button
+                    onClick={() => { setShowFeatureLimitsModal(false); onTabChange('STORE'); }}
+                    className="w-full py-3 rounded-2xl bg-gradient-to-r from-violet-500 to-purple-600 text-white font-black text-sm active:scale-95 transition"
+                  >
+                    ⚡ Upgrade Plan — Unlock Everything
+                  </button>
+                </div>
               )}
             </div>
           </div>
         );
       })()}
+
+      {/* CUSTOM CONFIRM DIALOG */}
+      {/* ═══════════ RULES PAGE MODAL ═══════════ */}
+      {showRulesPage && (
+        <div className="fixed inset-0 z-[9999] bg-white flex flex-col animate-in slide-in-from-bottom-10 duration-200">
+          {/* Header */}
+          <div className="flex items-center gap-3 px-4 py-4 border-b border-slate-100 bg-white sticky top-0 shadow-sm">
+            <button onClick={() => setShowRulesPage(false)} className="p-2 rounded-full bg-slate-100 text-slate-600 hover:bg-slate-200 transition-all">
+              <svg width="16" height="16" viewBox="0 0 14 14" fill="none"><path d="M13 7H1M1 7l6-6M1 7l6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
+            <div>
+              <h2 className="text-base font-black text-slate-800">📋 Feature Rules</h2>
+              <p className="text-[10px] text-slate-500">Free · Basic · Ultra — sabke liye rules</p>
+            </div>
+          </div>
+          {/* Content */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-10">
+
+            {/* TIER HEADER */}
+            <div className="grid grid-cols-3 gap-1.5 sticky top-0 z-10 bg-white pb-2">
+              <div className="bg-slate-100 rounded-xl p-2 text-center">
+                <p className="text-[9px] font-black text-slate-400 uppercase">Free</p>
+                <p className="text-[8px] text-slate-400 mt-0.5">Basic access</p>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-2 text-center">
+                <p className="text-[9px] font-black text-amber-600 uppercase">Basic</p>
+                <p className="text-[8px] text-amber-500 mt-0.5">Subscribed</p>
+              </div>
+              <div className="bg-violet-50 border border-violet-200 rounded-xl p-2 text-center">
+                <p className="text-[9px] font-black text-violet-600 uppercase">Ultra</p>
+                <p className="text-[8px] text-violet-500 mt-0.5">Premium</p>
+              </div>
+            </div>
+
+            {/* WRITE MODE */}
+            <div className="bg-white border border-teal-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="bg-teal-50 px-4 py-2.5 flex items-center gap-2">
+                <span className="text-lg">✏️</span>
+                <div>
+                  <p className="font-black text-sm text-slate-800">Ultra View</p>
+                  <p className="text-[10px] text-slate-500">Styled HTML notes — sirf Ultra users ke liye</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 divide-x divide-slate-100">
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-slate-400">🔒 Locked</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Nahi milega</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-slate-400">🔒 Locked</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Nahi milega</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-violet-600">✅ Free</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Unlimited</p>
+                </div>
+              </div>
+              <div className="px-4 pb-2.5">
+                <p className="text-[9px] text-slate-400">⚡ Ultra plan exclusive — styled HTML notes ka full experience</p>
+              </div>
+            </div>
+
+            {/* HTML VIEWS */}
+            <div className="bg-white border border-purple-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="bg-purple-50 px-4 py-2.5 flex items-center gap-2">
+                <span className="text-lg">🌐</span>
+                <div>
+                  <p className="font-black text-sm text-slate-800">HTML / Rich Notes View</p>
+                  <p className="text-[10px] text-slate-500">Chunk notes ka full HTML rendered view</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 divide-x divide-slate-100">
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-red-500">🔒 Locked</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Available nahi</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-amber-600">🔒 Locked</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Ultra chahiye</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-green-600">✅ Free</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Ultra users only</p>
+                </div>
+              </div>
+            </div>
+
+            {/* VIDEO */}
+            <div className="bg-white border border-blue-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="bg-blue-50 px-4 py-2.5 flex items-center gap-2">
+                <span className="text-lg">🎬</span>
+                <div>
+                  <p className="font-black text-sm text-slate-800">Video Lectures</p>
+                  <p className="text-[10px] text-slate-500">Premium video content</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 divide-x divide-slate-100">
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-red-500">{settings?.defaultVideoCost ?? 10} coins</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Har video</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-green-600">{settings?.videoFreeLimitBasic ?? 5} free/day</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Phir coins lagenge</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-violet-600">{settings?.videoFreeLimitUltra ?? 10} free/day</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Phir coins lagenge</p>
+                </div>
+              </div>
+            </div>
+
+            {/* PDF / NOTES */}
+            <div className="bg-white border border-orange-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="bg-orange-50 px-4 py-2.5 flex items-center gap-2">
+                <span className="text-lg">📄</span>
+                <div>
+                  <p className="font-black text-sm text-slate-800">PDF / Notes Access</p>
+                  <p className="text-[10px] text-slate-500">Deep Dive aur Premium Notes</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 divide-x divide-slate-100">
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-red-500">{settings?.defaultPdfCost ?? 5} coins</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Har PDF</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-green-600">{settings?.pdfFreeLimitBasic ?? 5} free/day</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Phir {settings?.defaultPdfCost ?? 5} coins</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-violet-600">{settings?.pdfFreeLimitUltra ?? 10} free/day</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Phir {settings?.defaultPdfCost ?? 5} coins</p>
+                </div>
+              </div>
+            </div>
+
+            {/* MCQ / Q&A / FLASHCARD */}
+            <div className="bg-white border border-green-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="bg-green-50 px-4 py-2.5 flex items-center gap-2">
+                <span className="text-lg">❓</span>
+                <div>
+                  <p className="font-black text-sm text-slate-800">MCQ · Q&A · Flashcard</p>
+                  <p className="text-[10px] text-slate-500">Daily practice aur question bank</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 divide-x divide-slate-100">
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-blue-600">MCQ Maker ✅</p>
+                  <p className="text-[9px] text-slate-400 mt-1">{settings?.mcqLimitFree ?? 50}/day limit</p>
+                  <p className="text-[9px] text-slate-400">Q&A limit same</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-green-600">50 free/day</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Phir 5 coins/30 Qs</p>
+                  <p className="text-[9px] text-slate-400">MCQ+Q&A+Flash</p>
+                </div>
+                <div className="p-3 text-center">
+                  <p className="text-xs font-black text-violet-600">{settings?.mcqLimitUltra ?? 100} free/day</p>
+                  <p className="text-[9px] text-slate-400 mt-1">Phir 5 coins/30 Qs</p>
+                  <p className="text-[9px] text-slate-400">MCQ+Q&A+Flash</p>
+                </div>
+              </div>
+            </div>
+
+            {/* REWARDS */}
+            <div className="bg-white border border-amber-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="bg-amber-50 px-4 py-2.5 flex items-center gap-2">
+                <span className="text-lg">🎁</span>
+                <div>
+                  <p className="font-black text-sm text-slate-800">Rewards System</p>
+                  <p className="text-[10px] text-slate-500">Coins, subscription, discount, redeem codes</p>
+                </div>
+              </div>
+              <div className="px-4 py-3 space-y-2">
+                {(settings?.signupBonus ?? 0) > 0 && (
+                  <div className="flex items-center justify-between bg-amber-50 rounded-xl px-3 py-2">
+                    <p className="text-xs font-bold text-slate-700">🎉 Signup Bonus (ek baar)</p>
+                    <span className="text-xs font-black text-amber-700">+{settings?.signupBonus} CR</span>
+                  </div>
+                )}
+                {(() => {
+                  const lc = settings?.loginBonusConfig;
+                  const f = lc?.freeBonus ?? 2, b = lc?.basicBonus ?? 5, u = lc?.ultraBonus ?? 10;
+                  if (f === 0 && b === 0 && u === 0) return null;
+                  return (
+                    <div className="flex items-center justify-between bg-green-50 rounded-xl px-3 py-2">
+                      <p className="text-xs font-bold text-slate-700">🌅 Daily Login Bonus</p>
+                      <span className="text-xs font-black text-green-700">Free +{f} / Basic +{b} / Ultra +{u}</span>
+                    </div>
+                  );
+                })()}
+                {(settings?.engagementRewards || []).filter(r => r.enabled).map(r => (
+                  <div key={r.id} className="flex items-center justify-between bg-purple-50 rounded-xl px-3 py-2">
+                    <p className="text-xs font-bold text-slate-700">📚 {r.label || `${Math.round(r.seconds/60)} min Study`}</p>
+                    <span className="text-xs font-black text-purple-700">{r.type === 'COINS' ? `+${r.amount} CR` : `${r.subTier} ${r.subLevel}`}</span>
+                  </div>
+                ))}
+                <div className="flex items-center justify-between bg-rose-50 rounded-xl px-3 py-2">
+                  <p className="text-xs font-bold text-slate-700">⏱ Reward Expiry</p>
+                  <span className="text-xs font-black text-rose-700">{settings?.rewardExpiryHours ?? 12} ghante mein expire</span>
+                </div>
+              </div>
+            </div>
+
+            {/* UPGRADE CTA */}
+            <button
+              onClick={() => { setShowRulesPage(false); onTabChange('STORE'); }}
+              className="w-full py-3 bg-gradient-to-r from-indigo-600 to-violet-600 text-white rounded-2xl font-black text-sm active:scale-95 transition-all shadow-lg"
+            >
+              🚀 Plan Upgrade karo — Store Dekho
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════ NEW CONTENT NOTIFICATION SHEET ═══════════ */}
+      {showContentNewSheet && (() => {
+        const items = _newContentFiltered;
+        const allIds = items.map(i => i.id);
+        const tierLabel = (t: string) => t === 'ULTRA' ? '⚡ Ultra' : t === 'BASIC' ? '🔵 Basic' : '🆓 Free';
+        const tierColor = (t: string) => t === 'ULTRA' ? 'bg-violet-100 text-violet-700' : t === 'BASIC' ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700';
+        const subjectIcon: Record<string, string> = {
+          biology: '🧬', chemistry: '⚗️', physics: '⚛️', economics: '📈',
+          geography: '🌏', polity: '⚖️', history: '📜',
+        };
+
+        const openItem = (item: ContentNotifItem) => {
+          const entry = _allLucentNotes.find(e => e.id === item.entryId);
+          if (!entry) { showAlert('Content nahi mila. Refresh karein.', 'ERROR'); return; }
+          if (item.requiredTier === 'ULTRA' && !_isUltraUser && user.role !== 'ADMIN') {
+            showAlert('यह content Ultra plan mein available hai! Store se upgrade karein. ⚡', 'INFO');
+            return;
+          }
+          if (item.requiredTier === 'BASIC' && !_isBasicUser && !_isUltraUser && user.role !== 'ADMIN') {
+            showAlert('यह content Basic / Ultra plan mein available hai! Store se upgrade karein. 🔵', 'INFO');
+            return;
+          }
+          markContentItemSeen(user.id, item.id);
+          setLucentNoteViewer(entry);
+          setLucentPageListViewer(entry);
+          setLucentPageIndex(item.pageIndex);
+          setShowContentNewSheet(false);
+        };
+
+        return (
+          <div
+            className="fixed inset-0 z-[9999] flex items-end justify-center"
+            style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(6px)' }}
+            onClick={() => setShowContentNewSheet(false)}
+          >
+            <div
+              className="bg-white rounded-t-3xl w-full max-w-lg max-h-[82vh] flex flex-col animate-in slide-in-from-bottom-10 duration-200"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-slate-100">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">🔔</span>
+                    <h2 className="text-base font-black text-slate-800">Naya Content</h2>
+                    {items.length > 0 && (
+                      <span className="bg-amber-500 text-white text-[10px] font-black px-2 py-0.5 rounded-full">{items.length} new</span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Lucent · Competition — Last 7 days</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {items.length > 0 && (
+                    <button
+                      onClick={() => { markAllContentItemsSeen(user.id, allIds); setShowContentNewSheet(false); }}
+                      className="text-[10px] font-black text-slate-500 bg-slate-100 hover:bg-slate-200 px-2.5 py-1.5 rounded-xl transition-all"
+                    >
+                      Sab dekha ✓
+                    </button>
+                  )}
+                  <button onClick={() => setShowContentNewSheet(false)} className="p-1.5 rounded-full bg-slate-100 text-slate-500">✕</button>
+                </div>
+              </div>
+
+              {/* List */}
+              <div className="overflow-y-auto flex-1 px-4 py-3 space-y-2">
+                {items.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <span className="text-4xl mb-3">📭</span>
+                    <p className="font-black text-slate-700 text-sm">Koi naya content nahi</p>
+                    <p className="text-xs text-slate-400 mt-1">Last 7 din mein koi naya page nahi aaya</p>
+                  </div>
+                ) : items.map(item => (
+                  <button
+                    key={item.id}
+                    onClick={() => openItem(item)}
+                    className="w-full text-left flex items-start gap-3 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-2xl p-3.5 hover:from-amber-100 hover:to-orange-100 active:scale-[.99] transition-all shadow-sm"
+                  >
+                    {/* Subject icon */}
+                    <div className="w-10 h-10 rounded-xl bg-white border border-amber-200 flex items-center justify-center shrink-0 text-lg shadow-sm">
+                      {subjectIcon[item.subject] || '📖'}
+                    </div>
+
+                    {/* Info */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                        <span className="text-[10px] font-black text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full">
+                          📚 {item.bookName}
+                        </span>
+                        <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${tierColor(item.requiredTier)}`}>
+                          {tierLabel(item.requiredTier)}
+                        </span>
+                        <span className="text-[10px] font-bold text-slate-400">{formatContentDate(item.date)}</span>
+                      </div>
+                      <p className="text-sm font-black text-slate-800 truncate">{item.lessonTitle}</p>
+                      <p className="text-[11px] text-slate-500 font-medium">
+                        Page {item.pageNo}
+                        {item.classLevel && item.classLevel !== 'COMPETITION'
+                          ? ` · Class ${item.classLevel}`
+                          : ' · Competition'}
+                      </p>
+                    </div>
+
+                    {/* CTA arrow */}
+                    <div className="shrink-0 self-center">
+                      {(item.requiredTier === 'ULTRA' && !_isUltraUser && user.role !== 'ADMIN') ||
+                       (item.requiredTier === 'BASIC' && !_isBasicUser && !_isUltraUser && user.role !== 'ADMIN') ? (
+                        <span className="text-[10px] font-black text-violet-600 bg-violet-100 px-2 py-1 rounded-lg">Upgrade</span>
+                      ) : (
+                        <span className="text-amber-500">→</span>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Footer */}
+              <div className="px-5 pb-4 pt-2 border-t border-slate-50">
+                <p className="text-center text-[10px] text-slate-400">
+                  Subscription ke hisab se content dikhega · {items.length} item{items.length !== 1 ? 's' : ''} available
+                </p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════ LOGIN HISTORY OVERLAY ═══════════ */}
+      {showLoginHistory && (() => {
+        const sessions = getLoginHistory(user.id).slice(0, 20);
+        return (
+          <div className="fixed inset-0 z-[9999] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(6px)' }} onClick={() => setShowLoginHistory(false)}>
+            <div className="bg-white rounded-t-3xl w-full max-w-lg max-h-[80vh] flex flex-col animate-in slide-in-from-bottom-10 duration-200" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-slate-100">
+                <div>
+                  <h2 className="text-base font-black text-slate-800">Login History</h2>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Aapki recent login sessions</p>
+                </div>
+                <button onClick={() => setShowLoginHistory(false)} className="p-1.5 rounded-full bg-slate-100 text-slate-500">✕</button>
+              </div>
+              <div className="overflow-y-auto flex-1 px-5 py-3 space-y-2">
+                {sessions.length === 0 ? (
+                  <p className="text-center text-slate-400 text-sm py-8">Koi login history nahi mili</p>
+                ) : sessions.map((s, i) => (
+                  <div key={s.id} className={`rounded-xl p-3 border ${i === 0 ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-100'}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${i === 0 ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-600'}`}>
+                          {i === 0 ? '🟢 Current' : `#${i + 1}`}
+                        </span>
+                        <div>
+                          <p className="text-xs font-black text-slate-800">{formatLoginTime(s.loginAt)}</p>
+                          {s.logoutAt && (
+                            <p className="text-[10px] text-slate-500">Logout: {formatLoginTime(s.logoutAt)}</p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        {s.durationSec !== undefined ? (
+                          <span className="text-[11px] font-black text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">
+                            ⏱ {formatDuration(s.durationSec)}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-400">Active</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 pb-5 pt-2">
+                <p className="text-center text-[10px] text-slate-400">Last {sessions.length} sessions • Local device storage</p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {confirmDialog?.isOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm px-6 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 flex flex-col gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-red-100 flex items-center justify-center shrink-0">
+                <span className="text-xl">🗑️</span>
+              </div>
+              <div>
+                <p className="font-black text-slate-800 text-sm">Delete karein?</p>
+                <p className="text-xs text-slate-500 mt-0.5">{confirmDialog.message}</p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 text-slate-700 font-black text-sm active:scale-95 transition-all hover:bg-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDialog.onConfirm}
+                className="flex-1 py-2.5 rounded-xl bg-red-500 text-white font-black text-sm active:scale-95 transition-all hover:bg-red-600"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

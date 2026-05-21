@@ -120,6 +120,16 @@ export interface User {
   createdAt: string;
   credits: number; // Premium Credits
   streak: number; // Consecutive days
+  longestStreak?: number; // All-time highest streak
+  topBarEffectColor?: string; // Custom shimmer color gifted via redeem code
+  themeBadgeColor?: string;
+  themeAnimationId?: string;
+  themePublishedAt?: string;
+  animationPublishedAt?: string;
+  customTheme?: UserCustomTheme;
+  customAnimation?: UserCustomAnimation;
+  activeThemeAppliedUntil?: string;
+  activeAnimationAppliedUntil?: string;
   level?: number; // Current Level (Default 1)
   xp?: number; // Current XP
   lastLoginDate: string; // ISO Date string YYYY-MM-DD
@@ -170,6 +180,16 @@ export interface User {
   lastRewardClaimDate?: string; // To track daily 3-hour study reward
   lastLoginRewardDate?: string; // NEW: Daily Login Bonus (10 coins)
   storeDiscount?: number; // NEW: Personal Store Discount %
+  dailyMcqDate?: string; // YYYY-MM-DD for daily MCQ tracking
+  dailyMcqCount?: number; // MCQs attempted today
+  dailyMcqCorrect?: number; // Correct MCQs today
+  dailyMcqRewardClaimed?: boolean; // Whether reward claimed today
+  dailyWriteDate?: string; // YYYY-MM-DD for write mode tracking
+  dailyWriteCount?: number; // Write mode unlocks today
+  dailyVideoDate?: string; // YYYY-MM-DD for video tracking
+  dailyVideoCount?: number; // Videos watched today
+  dailyPdfDate?: string; // YYYY-MM-DD for PDF tracking
+  dailyPdfCount?: number; // PDFs viewed today
   
   // SUBSCRIPTION MANAGEMENT
   subscriptionTier?: 'FREE' | 'WEEKLY' | 'MONTHLY' | '3_MONTHLY' | 'YEARLY' | 'LIFETIME' | 'CUSTOM'; // Added 3_MONTHLY and CUSTOM
@@ -316,6 +336,7 @@ export interface BannerSettings {
     autoHideSeconds: number;
     bgColor?: string;
     textColor?: string;
+    clickUrl?: string;
 }
 
 export interface BannerItem {
@@ -358,11 +379,45 @@ export interface FeatureCostConfig {
     ultraCost: number;
 }
 
+export interface LoginBonusRandomGiftOption {
+    type: 'DISCOUNT' | 'SUBSCRIPTION' | 'EFFECT' | 'CREDITS';
+    weight: number; // relative probability weight (higher = more likely)
+    amount?: number; // for CREDITS type
+    discountPercent?: number; // for DISCOUNT type
+    subTier?: 'DAILY' | 'WEEKLY' | 'MONTHLY'; // for SUBSCRIPTION type
+    subLevel?: 'BASIC' | 'ULTRA'; // for SUBSCRIPTION type
+    effectId?: string; // for EFFECT type
+    label?: string;
+}
+
 export interface LoginBonusConfig {
     freeBonus: number;
     basicBonus: number;
     ultraBonus: number;
     strictStreak: boolean;
+    randomGiftEnabled?: boolean;
+    randomGiftChance?: number; // 0-100 percent chance each login
+    randomGiftOptions?: LoginBonusRandomGiftOption[];
+}
+
+export interface BroadcastRedeemCode {
+    id: string;
+    code: string;
+    type: 'CREDITS' | 'SUBSCRIPTION' | 'DISCOUNT' | 'CONTENT_UNLOCK' | 'TOPBAR_EFFECT_COLOR' | 'TOPBAR_EFFECT_ID';
+    message: string;
+    title?: string;
+    amount?: number;
+    discountPercent?: number;
+    subTier?: string;
+    subLevel?: string;
+    effectColor?: string;
+    effectId?: string;
+    contentId?: string;
+    maxUses?: number;
+    durationHours?: number; // how long the code is valid after delivery
+    sentAt: string;
+    expiresAt?: string; // when this broadcast itself expires
+    targetTier?: 'ALL' | 'FREE' | 'BASIC' | 'ULTRA'; // who to send to
 }
 
 export interface EventBannerConfig {
@@ -414,6 +469,11 @@ export interface HomeworkItem {
   pdfUrl?: string;
   targetSubject?: string;
   pageNo?: string; // Optional page number for page-wise notes (Sar Sangrah / Speedy etc.)
+  topicName?: string; // Optional topic name for compare-based topic matching across books
+  /** Plain-text notes for Read Mode (TTS ChunkedNotesReader). Falls back to notes if absent. */
+  chunkNotes?: string;
+  /** HTML/CSS formatted notes for Write Mode (Smart HTML view). Falls back to notes if absent. */
+  htmlNotes?: string;
 }
 
 export interface LucentPageNote {
@@ -426,6 +486,15 @@ export interface LucentPageNote {
   /** Optional admin-curated MCQs for this specific page. When present, the
    *  reader shows them under the MCQ tab instead of AI-generating from text. */
   mcqs?: MCQItem[];
+  /** Optional topic name tag for compare-based topic matching across books.
+   *  When set, compare view will find this exact topic from all books. */
+  topicName?: string;
+  /** Plain-text notes for Read Mode (TTS ChunkedNotesReader).
+   *  When set, the Read Mode reader uses this instead of stripping HTML from content. */
+  chunkNotes?: string;
+  /** HTML/CSS formatted notes for Write Mode (Smart HTML view).
+   *  When set, Write Mode renders this as rich HTML. Falls back to content if absent. */
+  htmlNotes?: string;
 }
 
 export interface LucentNoteEntry {
@@ -452,13 +521,15 @@ export interface AppNotification {
   id: string;
   title: string;
   body: string;
-  type: 'info' | 'reward';
+  type: 'info' | 'reward' | 'CONTENT';
   rewardCredits?: number;
   createdAt: string;
+  expiresAt?: string; // ISO date — auto-hidden after this time (e.g. 7 days for content alerts)
 }
 
 export interface SystemSettings {
   notifications?: AppNotification[];
+  broadcastRedeemCodes?: BroadcastRedeemCode[];
   loadingScreenVideoUrl?: string; // NEW: Video to show before loading screen
   dailyGk?: DailyGkItem[]; // NEW: Daily GK
   homework?: HomeworkItem[];
@@ -500,6 +571,10 @@ export interface SystemSettings {
   mcqLimitFree?: number; // Daily Limit Free
   mcqLimitBasic?: number; // Daily Limit Basic
   mcqLimitUltra?: number; // Daily Limit Ultra
+  /** Max books allowed in one Compare session. 0 = unlimited. */
+  compareLimitFree?: number;   // default 2
+  compareLimitBasic?: number;  // default 5
+  compareLimitUltra?: number;  // default 0 (unlimited)
   mcqTestLimitBasic?: number;
   mcqAnalysisCostBasic?: number;
   mcqAnalysisCostUltra?: number;
@@ -508,7 +583,7 @@ export interface SystemSettings {
   mcqAnalysisCost?: number;
   appShortName?: string; // e.g. "IIC"
   appShortNameSize?: number; // Font size in pixels for loading-screen short name (admin slider, 24-120). Default 30.
-  developerName?: string; // Shown as "Developed by …" on the loading screen and profile page. Default "Nadim Anwar".
+  developerName?: string; // Shown as "Developed by …" on the loading screen and profile page. Default "Shivangi Singh".
   /** Admin-defined extra "books" (Sar Sangrah / Speedy ki tarah). Each entry becomes:
    *   - a target-subject option in the Homework form (admin)
    *   - a subject card on the student dashboard, opening a flat page-wise list of notes/MCQs
@@ -536,6 +611,11 @@ export interface SystemSettings {
       top: BannerSettings;
       bottom: BannerSettings;
   };
+  planBanners?: {
+      free?: { enabled: boolean; text: string; bgColor: string; textColor: string };
+      basic?: { enabled: boolean; text: string; bgColor: string; textColor: string };
+      ultra?: { enabled: boolean; text: string; bgColor: string; textColor: string };
+  };
   playerBrandingText?: string; // NEW: Custom Video Player Overlay Text
   playerBlockShare?: boolean; // NEW: Block Share
   appLogo?: string; // NEW: Base64 Logo Image
@@ -545,6 +625,8 @@ export interface SystemSettings {
   footerColor?: string; // NEW: Customized footer color
   aiName?: string;
   themeColor?: string;
+  darkThemeColor?: string;
+  lightThemeColor?: string;
   isGlobalFreeMode?: boolean; // NEW: Global Free Mode
   watermarkOpacity?: number; // 0.0 to 1.0
   watermarkSize?: number; // px
@@ -597,10 +679,18 @@ export interface SystemSettings {
   chatMode?: 'GLOBAL' | 'ROOMS'; // NEW
   chatCooldownHours?: number; // NEW
   chatEditTimeLimit?: number; // NEW
+  allowStudentCommunityMcq?: boolean; // NEW: Allow students to send MCQs in community chat
+  hideGlobalChat?: boolean; // NEW: Hide Global tab in community chat
   featuredItems?: FeaturedItem[]; // NEW
   aiUsageSplit?: any; // NEW (for stats)
   dailyReward?: number;
   signupBonus?: number;
+  rewardExpiryHours?: number; // How long rewards stay claimable (default 12)
+  mcqDailyMinimum?: number; // Min MCQs per day for reward (default 50)
+  storeVisitDiscountPercent?: number; // % discount sent to mailbox when non-subscriber visits Store (default 10)
+  htmlUnlockCost?: number; // Credits required for free/basic users to unlock HTML write view per session (default 5)
+  basicHtmlDailyLimit?: number; // Free HTML view sessions per day for Basic subscribers (default 3)
+  mcqRewardRules?: MCQRewardRule[];
 
   // LEVEL SYSTEM (Admin Config)
   isLevelSystemEnabled?: boolean;
@@ -614,6 +704,7 @@ export interface SystemSettings {
   spinLimitUltra?: number;
   spinLimitBasic?: number;
   spinLimitFree?: number;
+  spinGameTypes?: SpinGameType[]; // Multiple spin game types (free/credit-based)
   allowedClasses?: string[];
   allowedBoards?: string[];
   allowedStreams?: string[];
@@ -621,6 +712,10 @@ export interface SystemSettings {
   hiddenClasses?: string[]; // NEW: Granular Class Hiding
   hiddenChapters?: string[]; // NEW: Granular Chapter Hiding
   hiddenTopBarButtons?: string[]; // NEW: Per-button top bar hide/unhide (CREDITS, LIGHTNING, NOTIFICATION, SALE, STREAK)
+  topBarEffects?: Array<{ id: string; enabled: boolean; color: string; speed?: number }>; // Admin-configurable top bar visual effects
+  topBarAutoScroll?: boolean; // Auto-scroll the top bar button strip left/right
+  topBarAutoScrollInterval?: number; // Seconds between each scroll step (default 3)
+  profileBarEffects?: Array<{ id: string; enabled: boolean; color: string; speed?: number }>; // Separate effects for Profile page header card
   hiddenHomeButtons?: string[]; // NEW: Per-button home grid hide/unhide (feature IDs)
   hiddenBottomNavButtons?: string[]; // NEW: Per-button bottom nav hide/unhide (HOMEWORK, REVISION, IMPORTANT, VIDEO, APPSTORE, etc.)
   contentVisibility?: { // NEW: Global Content Type Toggles
@@ -654,6 +749,15 @@ export interface SystemSettings {
   nameChangeCost?: number;
   defaultVideoCost?: number;
   defaultPdfCost?: number; // NEW
+  videoFreeLimitBasic?: number; // Free videos/day for Basic (default 5)
+  videoFreeLimitUltra?: number; // Free videos/day for Ultra (default 10)
+  pdfFreeLimitBasic?: number; // Free PDFs/day for Basic (default 5)
+  pdfFreeLimitUltra?: number; // Free PDFs/day for Ultra (default 10)
+  writeModeFreeLimitBasic?: number; // Free write modes/day for Basic (default 5)
+  writeModeFreeLimitUltra?: number; // Free write modes/day for Ultra (default 10)
+  writeModeCreditFree?: number; // Write mode cost for Free users (default 5)
+  writeModeCreditPaid?: number; // Write mode cost after free limit (default 10)
+  writeModeMaxLimit?: number; // After this many uses, cost becomes 20 for all (default 20)
   deepDiveCost?: number; // NEW
   audioSlideCost?: number; // NEW
   enableMcqUnlockRestriction?: boolean; // NEW
@@ -728,6 +832,7 @@ export interface SystemSettings {
     enabled: boolean;
     eventName: string; // e.g., "Diwali Offer"
     discountPercent: number;
+    couponCode?: string; // Discount coupon code shown in mailbox
     showToFreeUsers: boolean;
     showToPremiumUsers: boolean;
     renewalDiscountPercent?: number; // Extra discount for already subscribed users
@@ -864,11 +969,26 @@ export interface AppFeature {
 
 export interface SpinReward {
   id: string;
-  type: 'COINS' | 'SUBSCRIPTION';
-  value: number | string; // Coins amount or Sub Tier (e.g., 'WEEKLY_BASIC')
+  type: 'COINS' | 'SUBSCRIPTION' | 'GIFT_CODE';
+  value: number | string; // Coins amount or Sub Tier (e.g., 'WEEKLY_BASIC') or gift code string
   label: string;
-  probability?: number; // Optional weighting
+  probability?: number; // Optional weighting (0-100, sum should be 100)
   color?: string; // Optional custom color
+  giftCode?: string; // For GIFT_CODE type: the actual code to deliver
+  expiryHours?: number; // For GIFT_CODE type: how many hours the code is valid after winning
+}
+
+export interface SpinGameType {
+  id: string;
+  name: string; // e.g., "Free Spin", "Lucky Spin", "Premium Spin"
+  cost: number; // 0 = free, >0 = credit-based
+  description?: string;
+  dailyLimitFree?: number;
+  dailyLimitBasic?: number;
+  dailyLimitUltra?: number;
+  rewards: SpinReward[]; // Each type can have its own rewards/probabilities
+  color?: string; // Accent color for the UI card
+  emoji?: string; // Display emoji
 }
 
 export interface FeaturedItem {
@@ -893,14 +1013,38 @@ export interface EngagementReward {
   durationHours?: number; // How long the sub lasts
   label: string; // "10 Mins Study: 2 Coins"
   enabled: boolean;
+  // Redeem Code Auto-Generation
+  generateRedeemCode?: boolean;
+  redeemCodeType?: 'CREDITS' | 'SUBSCRIPTION' | 'DISCOUNT' | 'CONTENT_UNLOCK' | 'TOPBAR_EFFECT_COLOR';
+  redeemCodeAmount?: number;
+  redeemCodeDiscountPercent?: number;
+  redeemCodeSubTier?: 'WEEKLY' | 'MONTHLY' | 'LIFETIME';
+  redeemCodeSubLevel?: 'BASIC' | 'ULTRA';
+  redeemCodeExpiryHours?: number;
+  redeemCodeContentId?: string;
+  redeemCodeEffectColor?: string;
+}
+
+export interface MCQRewardRule {
+  id: string;
+  minPercentage: number;
+  rewardType: 'COINS' | 'SUBSCRIPTION';
+  rewardAmount?: number;
+  rewardSubTier?: 'WEEKLY' | 'MONTHLY' | 'LIFETIME';
+  rewardSubLevel?: 'BASIC' | 'ULTRA';
+  rewardDurationHours?: number;
+  label: string;
+  enabled: boolean;
 }
 
 export interface GiftCode {
   id: string;
   code: string;
-  type: 'CREDITS' | 'SUBSCRIPTION' | 'DISCOUNT' | 'CONTENT_UNLOCK'; // New: Type of code
+  type: 'CREDITS' | 'SUBSCRIPTION' | 'DISCOUNT' | 'CONTENT_UNLOCK' | 'TOPBAR_EFFECT_COLOR' | 'TOPBAR_EFFECT_ID'; // New: Type of code
   amount?: number; // For Credits
   discountPercent?: number; // For Discount
+  effectColor?: string; // For TOPBAR_EFFECT_COLOR — hex color
+  effectId?: string; // For TOPBAR_EFFECT_ID — specific animation effect id
   subTier?: 'WEEKLY' | 'MONTHLY' | '3_MONTHLY' | 'YEARLY' | 'LIFETIME' | 'CUSTOM'; // For Subscription
   subLevel?: 'BASIC' | 'ULTRA'; // For Subscription
   contentId?: string; // For Content Unlock
@@ -1188,6 +1332,11 @@ export interface LessonContent {
   additionalNotes?: AdditionalNoteEntry[]; // NEW: Additional Notes
   quickNotes?: QuickNoteEntry[]; // NEW: Quick Notes
 
+  // MULTI-HTML SECTIONS: Multiple HTML blocks shown on same notes page
+  htmlSections?: { id: string; title?: string; html: string }[];
+  schoolHtmlSections?: { id: string; title?: string; html: string }[];
+  competitionHtmlSections?: { id: string; title?: string; html: string }[];
+
   // MODE SPECIFIC UNLIMITED ENTRIES
   schoolDeepDiveEntries?: DeepDiveEntry[];
   competitionDeepDiveEntries?: DeepDiveEntry[];
@@ -1260,7 +1409,37 @@ export interface StudentTestAttempt {
   answers: Record<number, number>; // question index -> selected answer index
 }
 
-export type StudentTab = 'HOME' | 'EXPLORE' | 'COURSES' | 'ROUTINE' | 'HISTORY' | 'REDEEM' | 'PREMIUM' | 'GAME' | 'WEEKLY_TEST' | 'PROFILE' | 'LEADERBOARD' | 'STORE' | 'VIDEO' | 'PDF' | 'MCQ' | 'ANALYTICS' | 'PRIZES' | 'REWARDS' | 'UPDATES' | 'IIC_GALLERY' | 'SUPPORT' | 'CUSTOM_PAGE' | 'AI_CHAT' | 'REVISION' | 'MCQ_REVIEW' | 'AI_HUB' | 'AI_STUDIO' | 'UNIVERSAL_VIDEO' | 'DOWNLOADS' | 'APP_STORE';
+export type StudentTab = 'HOME' | 'EXPLORE' | 'COURSES' | 'ROUTINE' | 'HISTORY' | 'REDEEM' | 'PREMIUM' | 'GAME' | 'EARN' | 'WEEKLY_TEST' | 'PROFILE' | 'LEADERBOARD' | 'STORE' | 'VIDEO' | 'PDF' | 'MCQ' | 'ANALYTICS' | 'PRIZES' | 'REWARDS' | 'UPDATES' | 'IIC_GALLERY' | 'SUPPORT' | 'CUSTOM_PAGE' | 'AI_CHAT' | 'REVISION' | 'MCQ_REVIEW' | 'AI_HUB' | 'AI_STUDIO' | 'UNIVERSAL_VIDEO' | 'DOWNLOADS' | 'APP_STORE' | 'THEME_BUILDER';
+
+export interface UserCustomTheme {
+  id: string;
+  userId: string;
+  userName: string;
+  bgColor: string;
+  accentColor: string;
+  textColor: string;
+  cardColor: string;
+  createdAt: string;
+  appliedUntil?: string;
+  publishedAt?: string;
+  publishedName?: string;
+  likes?: number;
+}
+
+export interface UserCustomAnimation {
+  id: string;
+  userId: string;
+  userName: string;
+  effectId: string;
+  effectName: string;
+  color: string;
+  speed: number;
+  createdAt: string;
+  appliedUntil?: string;
+  publishedAt?: string;
+  publishedName?: string;
+  likes?: number;
+}
 
 export type Language = 'English' | 'Hindi';
 
@@ -1315,4 +1494,38 @@ export interface FeatureRow {
 export interface FeatureCategory {
     name: string;
     features: FeatureRow[];
+}
+
+export interface DemandEntry {
+    id: string;
+    userId: string;
+    userName: string;
+    displayId?: string;
+    classLevel?: string;
+    board?: string;
+    subjectName: string;
+    chapterName: string;
+    pageNo?: string;
+    contentType: 'PDF' | 'VIDEO' | 'MCQ' | 'NOTES' | 'ANY';
+    note?: string;
+    timestamp: string;
+    status: 'PENDING' | 'IN_PROGRESS' | 'DONE' | 'REJECTED';
+}
+
+export interface ChatMessage {
+    id: string;
+    userId: string;
+    userName: string;
+    role: Role;
+    subscriptionLevel?: string;
+    type: 'TEXT' | 'MCQ' | 'ADMIN_BROADCAST';
+    text?: string;
+    mcqData?: {
+        question: string;
+        options: string[];
+        correctAnswer: number;
+        explanation?: string;
+    };
+    isAdminOnly?: boolean;
+    timestamp: string;
 }

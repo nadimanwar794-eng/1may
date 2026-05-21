@@ -1,11 +1,8 @@
 import React from 'react';
-import { ClassLevel, Subject, Stream } from '../types';
+import { ClassLevel, Subject, Stream, Board, SystemSettings, LucentNoteEntry } from '../types';
 import { getSubjectsList } from '../constants';
-import { Calculator, FlaskConical, Languages, Globe2, BookMarked, History, Binary, TrendingUp, Briefcase, Landmark, Palette, Feather, Home, HeartPulse, Activity, Cpu, ChevronRight } from 'lucide-react';
-
-import { Board } from '../types';
-
-import { SystemSettings } from '../types';
+import { Calculator, FlaskConical, Languages, Globe2, BookMarked, History, TrendingUp, Briefcase, Landmark, Feather, Home, HeartPulse, Activity, Cpu, ChevronRight } from 'lucide-react';
+import type { ContentIndexMap } from '../firebase';
 
 interface Props {
   classLevel: ClassLevel;
@@ -13,136 +10,120 @@ interface Props {
   board?: Board;
   onSelect: (subject: Subject) => void;
   onBack: () => void;
-  hideBack?: boolean; // New prop to hide back button when used in Dashboard
+  hideBack?: boolean;
   initialParentSubject?: string | null;
   settings?: SystemSettings | null;
+  contentIndex?: ContentIndexMap;
+  lucentNotes?: LucentNoteEntry[];
 }
 
-const SubjectIcon: React.FC<{ icon: string, className?: string }> = ({ icon, className }) => {
-    switch(icon) {
-        case 'math': return <Calculator className={className} />;
-        case 'science': 
-        case 'physics': return <FlaskConical className={className} />;
-        case 'flask': return <FlaskConical className={className} />; 
-        case 'bio': return <HeartPulse className={className} />;
-        case 'english': 
-        case 'hindi':
-        case 'sanskrit':
-        case 'book':
-            return <Languages className={className} />;
-        case 'social': return <Globe2 className={className} />;
-        case 'geo': return <Globe2 className={className} />;
-        case 'computer': return <Cpu className={className} />;
-        case 'history': return <History className={className} />;
-        case 'accounts': return <TrendingUp className={className} />;
-        case 'business': return <Briefcase className={className} />;
-        case 'gov': return <Landmark className={className} />;
-        case 'ppl': return <BookMarked className={className} />;
-        case 'mind': return <Feather className={className} />;
-        case 'home': return <Home className={className} />;
-        case 'active': return <Activity className={className} />;
-        default: return <BookMarked className={className} />;
-    }
-}
-
-export const SubjectSelection: React.FC<Props> = ({ classLevel, stream, board, onSelect, onBack, hideBack = false, initialParentSubject = null, settings }) => {
-  const [selectedParentSubject, setSelectedParentSubject] = React.useState<string | null>(initialParentSubject);
-
-  React.useEffect(() => {
-      if (initialParentSubject) {
-          setSelectedParentSubject(initialParentSubject);
-      }
-  }, [initialParentSubject]);
-
-  const rawSubjects = getSubjectsList(classLevel, stream, board).filter(sub => !(settings?.hiddenSubjects || []).includes(sub.id));
-
-  const isClass9to12 = ['9', '10', '11', '12'].includes(classLevel);
-  const isClass6to8 = ['6', '7', '8'].includes(classLevel);
-
-  // Create a display list of subjects based on grouping
-  // By default, just use the raw list, unless we need to show groups.
-  // The raw list already contains Physics, Chemistry, Biology, History, Geo etc. if we updated constants.ts
-  // Wait, if constants.ts already returns Physics, Chemistry, Biology instead of Science for 9/10,
-  // we just need to group them under "Science" and "Social Science" visually here.
-
-  let displaySubjects: Subject[] = [];
-  let subSubjects: Subject[] = [];
-
-  const scienceGroup = ['Physics', 'Chemistry', 'Biology', 'भौतिकी', 'रसायन शास्त्र', 'जीव विज्ञान'];
-  const sstGroup9to12 = ['History', 'Geography', 'Political Science', 'Economics', 'इतिहास', 'भूगोल', 'राजनीति विज्ञान', 'अर्थशास्त्र'];
-  const sstGroup6to8 = ['History', 'Geography', 'Political Science', 'इतिहास', 'भूगोल', 'राजनीति विज्ञान'];
-
-  if (selectedParentSubject === 'Science') {
-      subSubjects = rawSubjects.filter(s => scienceGroup.includes(s.name));
-  } else if (selectedParentSubject === 'Social Science') {
-      subSubjects = rawSubjects.filter(s => isClass9to12 ? sstGroup9to12.includes(s.name) : sstGroup6to8.includes(s.name));
-  } else {
-      // Build parent level view
-      rawSubjects.forEach(s => {
-          if (scienceGroup.includes(s.name) && isClass9to12) {
-              const parentName = board === 'BSEB' ? 'विज्ञान' : 'Science';
-              if (!displaySubjects.find(ds => ds.name === parentName)) {
-                  displaySubjects.push({ id: 'science', name: parentName, icon: 'science', color: 'bg-blue-50 text-blue-600' });
-              }
-          } else if ((sstGroup9to12.includes(s.name) && isClass9to12) || (sstGroup6to8.includes(s.name) && isClass6to8)) {
-              const parentName = board === 'BSEB' ? 'सामाजिक विज्ञान' : 'Social Science';
-              if (!displaySubjects.find(ds => ds.name === parentName)) {
-                  displaySubjects.push({ id: 'sst', name: parentName, icon: 'geo', color: 'bg-orange-50 text-orange-600' });
-              }
-          } else {
-              displaySubjects.push(s);
-          }
-      });
+const SubjectIcon: React.FC<{ icon: string; className?: string }> = ({ icon, className }) => {
+  switch (icon) {
+    case 'math':     return <Calculator className={className} />;
+    case 'science':
+    case 'physics':
+    case 'flask':    return <FlaskConical className={className} />;
+    case 'bio':      return <HeartPulse className={className} />;
+    case 'english':
+    case 'hindi':
+    case 'sanskrit':
+    case 'book':     return <Languages className={className} />;
+    case 'social':
+    case 'geo':      return <Globe2 className={className} />;
+    case 'computer': return <Cpu className={className} />;
+    case 'history':  return <History className={className} />;
+    case 'accounts': return <TrendingUp className={className} />;
+    case 'business': return <Briefcase className={className} />;
+    case 'gov':      return <Landmark className={className} />;
+    case 'ppl':      return <BookMarked className={className} />;
+    case 'mind':     return <Feather className={className} />;
+    case 'home':     return <Home className={className} />;
+    case 'active':   return <Activity className={className} />;
+    default:         return <BookMarked className={className} />;
   }
+};
 
-  const handleSelect = (subject: Subject) => {
-      if ((subject.name === 'Science' || subject.name === 'विज्ञान') && isClass9to12) {
-          setSelectedParentSubject('Science');
-      } else if (subject.name === 'Social Science' || subject.name === 'सामाजिक विज्ञान') {
-          setSelectedParentSubject('Social Science');
-      } else {
-          onSelect(subject);
-      }
-  };
+interface SubjectStats { notes: number; pdf: number; video: number; audio: number; mcq: number; lucentNotes: number; }
 
-  const handleBack = () => {
-      if (selectedParentSubject) {
-          setSelectedParentSubject(null);
-      } else {
-          onBack();
-      }
-  };
+const getSubjectStats = (
+  subject: Subject,
+  classLevel: string,
+  board: string,
+  contentIndex: ContentIndexMap,
+  lucentNotes: LucentNoteEntry[]
+): SubjectStats => {
+  const prefix = `nst_content_${board}_${classLevel}_`;
+  const subjectNameLower = subject.name.toLowerCase().replace(/\s+/g, '_');
+  let notes = 0, pdf = 0, video = 0, audio = 0, mcq = 0;
 
-  const activeList = selectedParentSubject ? subSubjects : displaySubjects;
+  Object.entries(contentIndex).forEach(([key, entry]) => {
+    if (!key.startsWith(prefix)) return;
+    const rest = key.slice(prefix.length); // e.g. "Physics_ch1"
+    const restLower = rest.toLowerCase();
+    const storedSubject = (entry.subject || '').toLowerCase().replace(/\s+/g, '_');
+    if (!storedSubject && !restLower.startsWith(subjectNameLower + '_')) return;
+    if (storedSubject && storedSubject !== subjectNameLower) return;
+    if (entry.notes)  notes++;
+    if (entry.pdf)    pdf++;
+    if (entry.video)  video++;
+    if (entry.audio)  audio++;
+    if (entry.mcq)    mcq++;
+  });
+
+  const lucentCount = lucentNotes.filter(n => {
+    const nClass = n.classLevel || 'COMPETITION';
+    return nClass === classLevel && (n.subject || '').toLowerCase() === subject.id.toLowerCase();
+  }).length;
+
+  return { notes, pdf, video, audio, mcq, lucentNotes: lucentCount };
+};
+
+export const SubjectSelection: React.FC<Props> = ({
+  classLevel, stream, board, onSelect, onBack, hideBack = false, settings,
+  contentIndex = {}, lucentNotes = []
+}) => {
+  const subjects = getSubjectsList(classLevel, stream, board).filter(
+    sub => !(settings?.hiddenSubjects || []).includes(sub.id)
+  );
+  const currentBoard = board || 'CBSE';
 
   return (
     <div className="animate-in fade-in slide-in-from-right-8 duration-500 mt-0 pt-0">
-      {(!hideBack || selectedParentSubject) && (
+      {!hideBack && (
         <div className="flex items-center mb-6">
-            <button onClick={handleBack} className="text-slate-600 hover:text-slate-800 transition-colors mr-4">
+          <button onClick={onBack} className="text-slate-600 hover:text-slate-800 transition-colors mr-4">
             &larr; Back
-            </button>
-            <div>
+          </button>
+          <div>
             <h2 className="text-2xl font-bold text-slate-800">
-                {selectedParentSubject ? (board === 'BSEB' ? (selectedParentSubject === 'Science' ? 'विज्ञान' : 'सामाजिक विज्ञान') : selectedParentSubject) : stream ? `${stream} Subjects` : `Class ${classLevel} Subjects`}
+              {stream ? `${stream} Subjects` : `Class ${classLevel} Subjects`}
             </h2>
-            <p className="text-slate-600 text-sm">Select a {selectedParentSubject ? 'sub-subject' : 'subject'} to view chapters</p>
-            </div>
+            <p className="text-slate-600 text-sm">Select a subject to view chapters</p>
+          </div>
         </div>
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        {activeList.map((subject) => {
+        {subjects.map((subject) => {
           const colorParts = (subject.color || 'bg-slate-50 text-slate-600').split(' ');
-          const bgClass = colorParts[0] || 'bg-slate-50';
+          const bgClass   = colorParts[0] || 'bg-slate-50';
           const textClass = colorParts[1] || 'text-slate-600';
-          const borderClass = bgClass.replace('bg-', 'border-').replace('50', '200');
-          const isGroup = subject.name === 'Science' || subject.name === 'विज्ञान' || subject.name === 'Social Science' || subject.name === 'सामाजिक विज्ञान';
-          const subtitle = selectedParentSubject || isGroup ? 'Explore Sections' : 'Explore Syllabus';
+          const borderClass = bgClass.replace('bg-', 'border-').replace('50', '200').replace('100', '300');
+          const stats = getSubjectStats(subject, classLevel, currentBoard, contentIndex, lucentNotes);
+          const totalContent = stats.notes + stats.pdf + stats.video + stats.audio + stats.mcq + stats.lucentNotes;
+
+          const statBadges: { emoji: string; count: number; color: string }[] = [
+            { emoji: '📝', count: stats.notes + stats.lucentNotes, color: 'text-indigo-600' },
+            { emoji: '📄', count: stats.pdf,   color: 'text-rose-600' },
+            { emoji: '📊', count: stats.mcq,   color: 'text-amber-600' },
+            { emoji: '🎥', count: stats.video, color: 'text-green-600' },
+            { emoji: '🔊', count: stats.audio, color: 'text-purple-600' },
+          ].filter(b => b.count > 0);
+
           return (
             <button
               key={subject.id}
-              onClick={() => handleSelect(subject)}
+              onClick={() => onSelect(subject)}
               className={`${bgClass} border-2 ${borderClass} p-4 rounded-2xl flex items-center gap-4 hover:shadow-md transition-all active:scale-95 text-left group`}
             >
               <div className={`w-12 h-12 rounded-xl ${subject.color} flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform`}>
@@ -150,7 +131,15 @@ export const SubjectSelection: React.FC<Props> = ({ classLevel, stream, board, o
               </div>
               <div className="flex-1 min-w-0">
                 <h3 className={`font-black text-base ${textClass} truncate`}>{subject.name}</h3>
-                <p className="text-[11px] text-slate-500 font-bold mt-0.5">{subtitle}</p>
+                {totalContent > 0 ? (
+                  <div className="flex items-center gap-1 flex-wrap mt-0.5">
+                    {statBadges.map(b => (
+                      <span key={b.emoji} className={`text-[10px] font-bold ${b.color}`}>{b.emoji}{b.count}</span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-slate-400 font-medium mt-0.5">No content yet</p>
+                )}
               </div>
               <ChevronRight size={18} className={`${textClass} opacity-60 shrink-0`} />
             </button>

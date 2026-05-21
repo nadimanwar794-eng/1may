@@ -23,6 +23,24 @@ export class ErrorBoundary extends Component<Props, State> {
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error('Uncaught error:', error, errorInfo);
+    // Auto-recover from Firestore IndexedDB assertion errors
+    const msg = error?.message || error?.toString() || '';
+    if (msg.includes('FIRESTORE') && msg.includes('INTERNAL ASSERTION FAILED')) {
+      console.warn('[IIC] Firestore assertion caught by ErrorBoundary — clearing cache…');
+      try {
+        const doReload = () => { try { localStorage.removeItem('nst_firebase_project_id'); } catch {} window.location.reload(); };
+        (indexedDB as any).databases?.().then((dbs: { name?: string }[]) => {
+          const dels = dbs
+            .filter(d => d.name && (d.name.includes('firestore') || d.name.includes('firebase')))
+            .map(d => new Promise<void>(res => {
+              const r = indexedDB.deleteDatabase(d.name!);
+              r.onsuccess = () => res();
+              r.onerror = () => res();
+            }));
+          Promise.all(dels).then(doReload).catch(doReload);
+        }).catch(doReload);
+      } catch { window.location.reload(); }
+    }
   }
 
   public render() {

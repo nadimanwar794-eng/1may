@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Volume2, Square, BookOpen, Star, Palette, Check, Type, RotateCcw, Search } from 'lucide-react';
+import { Volume2, Square, BookOpen, Star, Palette, Check, Type, RotateCcw, Search, Monitor } from 'lucide-react';
+import { rotateScreen, isDesktopModeOn, setDesktopMode } from '../utils/displayPrefs';
 import { speakText, stopSpeech } from '../utils/textToSpeech';
 import { splitIntoTopics, NotesTopic as Topic } from '../utils/notesSplitter';
 import { READING_FONTS, TOP_10_READING_FONTS, ensureReadingFontLoaded, getReadingFontById, ReadingFont } from '../utils/notesFonts';
@@ -8,6 +9,15 @@ import { ReadingStylePopover } from './ReadingStylePopover';
 const FONT_SIZES = [13, 15, 17, 20] as const;
 const FONT_SIZE_KEY = 'nst_reading_font_size';
 const FONT_FAMILY_KEY = 'nst_reading_font_family';
+const VOICE_SPEED_KEY = 'nst_tts_speed';
+const VOICE_SPEEDS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0] as const;
+const SPEED_LABELS = ['0.75x', '1x', '1.25x', '1.5x', '1.75x', '2x'] as const;
+const getStoredSpeedIdx = (): number => {
+  try {
+    const v = parseInt(localStorage.getItem(VOICE_SPEED_KEY) || '1', 10);
+    return isNaN(v) || v < 0 || v > 5 ? 1 : v;
+  } catch { return 1; }
+};
 
 const getStoredFontFamilyId = (): string | null => {
   try { return localStorage.getItem(FONT_FAMILY_KEY); } catch { return null; }
@@ -109,16 +119,366 @@ interface Props {
    *  inline Read More wrapper which lets the user pick a coherent background
    *  + text-colour preset together). */
   textColorOverride?: string;
+  /** When true and content is HTML, defaults to tappable chunk/TTS reader mode
+   *  (stripped plain text) instead of the styled HTML render. User can still
+   *  switch to HTML view via a toggle button. */
+  preferChunkMode?: boolean;
+  /** Called whenever the user toggles Desktop Mode inside this reader, so the
+   *  parent component can keep its own desktop-mode state in sync. */
+  onDesktopModeChange?: (isOn: boolean) => void;
+  /** Hide the Desktop Mode toggle in the top-bar (used by Competition mode) */
+  hideDesktopToggle?: boolean;
+  /** When true and `hideTopBar` is true, suppress the compact sticky Read All / small controls
+   *  so the reader is truly minimal (used for immersive full-screen in Competition mode). */
+  suppressStickyControls?: boolean;
+  /** Separate HTML-formatted notes to show when user clicks the HTML button.
+   *  Use this when the note has both plain chunkNotes (for TTS reading) AND
+   *  htmlNotes (for styled view) — passing htmlNotes here keeps the HTML button
+   *  visible even though `content` is plain text. */
+  htmlContent?: string;
+  /** When true, only Ultra subscribers can access the HTML styled view.
+   *  Others see a credits-based unlock prompt. */
+  isUltraUser?: boolean;
+  /** Current credits balance of the user (for credits-based unlock). */
+  userCredits?: number;
+  /** Credits cost to unlock HTML view for this session (default: 5). */
+  htmlUnlockCost?: number;
+  /** Called when user spends credits to unlock HTML view. */
+  onSpendCredits?: (amount: number) => void;
+  /** Called whenever HTML view is successfully opened (free OR after credits unlock). Use to track Basic-user daily quota. */
+  onHtmlOpen?: () => void;
 }
 
 
-export const ChunkedNotesReader: React.FC<Props> = ({ content, className, language = 'hi-IN', topBarLabel, autoStart, onComplete, onReadingStart, hideTopBar, initialIndex, onPositionChange, noteKey, isStarred, onStarToggle, searchQuery, getStarCount, textColorOverride }) => {
+export const ChunkedNotesReader: React.FC<Props> = ({ content, className, language = 'hi-IN', topBarLabel, autoStart, onComplete, onReadingStart, hideTopBar, initialIndex, onPositionChange, noteKey, isStarred, onStarToggle, searchQuery, getStarCount, textColorOverride, preferChunkMode, onDesktopModeChange, hideDesktopToggle, suppressStickyControls, htmlContent, isUltraUser, userCredits = 0, htmlUnlockCost = 5, onSpendCredits, onHtmlOpen }) => {
   const topics = useMemo(() => splitIntoTopics(content), [content]);
+
+  // ── Strips [span_N](start_span) / [span_N](end_span) TTS markers ──
+  const stripSpanMarkers = (s: string) =>
+    s.replace(/\[span_\d+\]\((start|end)_span\)/g, '');
+
+  // ── Lightweight markdown → HTML for mixed-content notes ──
+  // Converts headings / bold / italic / bullets / numbered lists in lines
+  // that are NOT already HTML tags. Full <!DOCTYPE> docs skip this entirely.
+  const inlineMd = (s: string) =>
+    s
+      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/(?<![*])\*(?![*\s])([^*\n]+?)(?<!\s)\*(?![*])/g, '<em>$1</em>')
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  const markdownToHtml = (text: string): string => {
+    const lines = text.split('\n');
+    const out: string[] = [];
+    let inUl = false;
+    let inOl = false;
+    let tableRows: string[][] = [];
+    let tableHasHeader = false;
+
+    const closeList = () => {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (inOl) { out.push('</ol>'); inOl = false; }
+    };
+    const flushTable = () => {
+      if (tableRows.length === 0) return;
+      out.push('<div class="chnr-table-wrap"><table class="md-table">');
+      tableRows.forEach((cells, ri) => {
+        const tag = (ri === 0 && tableHasHeader) ? 'th' : 'td';
+        out.push('<tr>' + cells.map(c => `<${tag}>${inlineMd(c.trim())}</${tag}>`).join('') + '</tr>');
+      });
+      out.push('</table></div>');
+      tableRows = [];
+      tableHasHeader = false;
+    };
+
+    for (const raw of lines) {
+      const trimmed = raw.trim();
+      // Existing HTML — preserve as-is
+      if (trimmed.startsWith('<') || trimmed === '') {
+        flushTable();
+        closeList();
+        out.push(raw);
+        continue;
+      }
+      // Table row: | col | col |
+      if (/^\|.+\|/.test(trimmed)) {
+        closeList();
+        // Separator row |---|---| → marks previous row as header
+        if (/^\|[\s\-|:]+\|$/.test(trimmed)) {
+          tableHasHeader = tableRows.length === 1;
+          continue;
+        }
+        const cells = trimmed.replace(/^\||\|$/g, '').split('|');
+        tableRows.push(cells);
+        continue;
+      }
+      // Flush pending table before other elements
+      flushTable();
+      // Headings: ### text
+      const hm = trimmed.match(/^(#{1,6})\s+(.+)$/);
+      if (hm) {
+        closeList();
+        out.push(`<h${hm[1].length}>${inlineMd(hm[2])}</h${hm[1].length}>`);
+        continue;
+      }
+      // Unordered list: * - + (any indent)
+      const ulm = raw.match(/^(\s*)[*\-+]\s+(.+)$/);
+      if (ulm) {
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        if (!inUl) { out.push('<ul>'); inUl = true; }
+        out.push(`<li>${inlineMd(ulm[2])}</li>`);
+        continue;
+      }
+      // Ordered list: 1. 2. etc. (any indent)
+      const olm = raw.match(/^(\s*)\d+[.)]\s+(.+)$/);
+      if (olm) {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (!inOl) { out.push('<ol>'); inOl = true; }
+        out.push(`<li>${inlineMd(olm[2])}</li>`);
+        continue;
+      }
+      // Regular paragraph
+      closeList();
+      out.push(`<p>${inlineMd(trimmed)}</p>`);
+    }
+    flushTable();
+    closeList();
+    return out.join('\n');
+  };
+
+  // ── HTML / Markdown content detection ──
+  // Returns true for HTML *and* for markdown so both go through markdownToHtml
+  // and render as styled HTML instead of raw plain text.
+  const isHtmlContent = useMemo(() => {
+    const t = stripSpanMarkers((content || '')).trim();
+    if ((t.startsWith('<') && (t.includes('</') || t.includes('/>'))) ||
+      /^<(div|p|ul|ol|h[1-6]|table|section|article|span|b|strong|style|blockquote)/i.test(t))
+      return true;
+    // Note has <style> or obvious HTML tags anywhere in the first 400 chars
+    if (/<style\b|<!DOCTYPE|<html\b|<div\b|<table\b|<h[1-6]\b/i.test(t.slice(0, 400)))
+      return true;
+    // When a separate htmlContent prop is provided, content is plain chunkNotes —
+    // skip markdown detection to avoid incorrectly treating plain text as HTML.
+    if (htmlContent?.trim()) return false;
+    // Markdown detection — headings, bullets, tables, bold/italic
+    const first800 = t.slice(0, 800);
+    if (/^#{1,6}\s+\S/m.test(first800)) return true;   // ## Heading
+    if (/^[*\-+]\s+\S/m.test(first800)) return true;    // * bullet
+    if (/^\d+[.)]\s+\S/m.test(first800)) return true;   // 1. ordered list
+    if (/^\|.+\|/m.test(first800)) return true;          // | table |
+    if (/\*\*[^*\n]+\*\*/.test(first800)) return true;  // **bold**
+    return false;
+  }, [content, htmlContent]);
+
+  // ── Extract <style> CSS text — runs on ALL content that has <style> blocks ──
+  const extractedStyles = useMemo(() => {
+    const styleRe = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+    const parts: string[] = [];
+    let m;
+    while ((m = styleRe.exec(content)) !== null) parts.push(m[1]);
+    return parts.join('\n');
+  }, [content]);
+
+  // ── Inject extracted <style> into document <head>, clean up on unmount ──
+  useEffect(() => {
+    if (!isHtmlContent || !extractedStyles) return;
+    const el = document.createElement('style');
+    el.setAttribute('data-chnr-html', 'true');
+    el.textContent = extractedStyles;
+    document.head.appendChild(el);
+    return () => { try { el.remove(); } catch {} };
+  }, [extractedStyles, isHtmlContent]);
+
+  // ── Build the clean HTML for rendering:
+  //    1. For full HTML docs — extract <body> content only
+  //    2. Strip <style>/<script> blocks (already injected separately)
+  //    3. Strip orphaned closing tags from page-split notes
+  //    4. Strip TTS span markers
+  //    5. Tag inline-styled box divs with 'chnr-box' class (for scroll + TTS exclusion)
+  // ──
+  const processedHtmlContent = useMemo(() => {
+    if (!isHtmlContent) return content;
+    let result = content;
+    const isFullHtmlDoc = /<!DOCTYPE|<html\b/i.test(result.trim());
+    // Full HTML document → extract <body> only
+    if (isFullHtmlDoc) {
+      const bodyMatch = result.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+      if (bodyMatch) result = bodyMatch[1];
+    }
+    // Remove complete <style>/<script> blocks
+    result = result.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
+    result = result.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+    // Remove orphaned closing tags (page-split notes)
+    result = result.replace(/<\/style>/gi, '').replace(/<\/script>/gi, '');
+    // Strip raw non-HTML text before first tag (leaked CSS) — only when
+    // content actually has HTML tags; pure markdown must NOT be stripped.
+    if (/<[a-zA-Z]/.test(result)) {
+      result = result.replace(/^[^<]*/s, '');
+    }
+    // Strip TTS span markers
+    result = stripSpanMarkers(result);
+    // Mixed markdown+HTML notes AND pure markdown: convert to HTML.
+    // Full HTML docs already have proper HTML — skip conversion for them.
+    if (!isFullHtmlDoc) {
+      result = markdownToHtml(result);
+    }
+    // Tag inline-styled box divs with 'chnr-box' so they scroll independently
+    // and are excluded from TTS. A "box" = has border-radius + (border or background).
+    // Also wrap every <table> in a .chnr-table-wrap for horizontal scrolling.
+    try {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = result;
+      tmp.querySelectorAll('div[style],section[style],aside[style]').forEach(el => {
+        const s = (el.getAttribute('style') || '').toLowerCase();
+        // Detect "box" style: any element with an explicit border shorthand (border:)
+        // OR border-left/right/top/bottom with padding, OR border-radius + background.
+        const isBox =
+          /border\s*:/.test(s) ||
+          (/border-(left|right|top|bottom)\s*:/.test(s) && s.includes('padding')) ||
+          (s.includes('border-radius') && (s.includes('border') || s.includes('background')));
+        if (isBox) {
+          el.classList.add('chnr-box');
+        }
+      });
+      // Wrap bare tables (not already inside .table-container/.chnr-table-wrap)
+      tmp.querySelectorAll('table').forEach(tbl => {
+        const parent = tbl.parentElement;
+        if (!parent) return;
+        const parentCls = (parent.className || '');
+        if (parentCls.includes('table-container') || parentCls.includes('chnr-table-wrap')) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'chnr-table-wrap';
+        parent.insertBefore(wrap, tbl);
+        wrap.appendChild(tbl);
+      });
+      result = tmp.innerHTML;
+    } catch { /* ignore DOM errors */ }
+    return result.trim();
+  }, [content, isHtmlContent]);
+
+  // ── Process external htmlContent prop ──
+  // For fragment HTML: keep <style> blocks intact (they define visual formatting).
+  // For full HTML docs: rescue <head> styles and prepend to body content.
+  // Also strips <script>, orphaned closing tags, TTS markers, converts markdown,
+  // tags box-divs and wraps tables — but NEVER removes <style> from fragments.
+  const processedExternalHtml = useMemo(() => {
+    const raw = htmlContent?.trim();
+    if (!raw) return '';
+    let result = raw;
+    const isFullHtmlDoc = /<!DOCTYPE|<html\b/i.test(result.trim());
+    if (isFullHtmlDoc) {
+      // Rescue <style> blocks from <head> so they still apply when rendered inline
+      const headStyles: string[] = [];
+      const headMatch = result.match(/<head\b[^>]*>([\s\S]*?)<\/head>/i);
+      if (headMatch) {
+        const styleRe = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
+        let m;
+        while ((m = styleRe.exec(headMatch[1])) !== null) headStyles.push(m[0]);
+      }
+      // Extract <body> content
+      const bodyMatch = result.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+      result = bodyMatch ? bodyMatch[1] : result;
+      // Prepend rescued head-styles so they apply inline
+      if (headStyles.length > 0) result = headStyles.join('\n') + '\n' + result;
+    }
+    // Remove <script> blocks only — keep <style> blocks so CSS formatting stays
+    result = result.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+    // Remove orphaned closing tags from page-split notes
+    result = result.replace(/<\/script>/gi, '');
+    // Strip raw non-HTML text before first tag (leaked CSS text)
+    if (/<[a-zA-Z]/.test(result)) result = result.replace(/^[^<]*/s, '');
+    // Strip TTS span markers
+    result = stripSpanMarkers(result);
+    // Pure markdown / mixed markdown+HTML: convert to HTML (skip for full HTML docs)
+    if (!isFullHtmlDoc && !/<[a-zA-Z]/.test(result.trim().slice(0, 100))) {
+      result = markdownToHtml(result);
+    }
+    // Tag box-divs with 'chnr-box' and wrap bare tables for horizontal scroll
+    try {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = result;
+      tmp.querySelectorAll('div[style],section[style],aside[style]').forEach(el => {
+        const s = (el.getAttribute('style') || '').toLowerCase();
+        const isBox =
+          /border\s*:/.test(s) ||
+          (/border-(left|right|top|bottom)\s*:/.test(s) && s.includes('padding')) ||
+          (s.includes('border-radius') && (s.includes('border') || s.includes('background')));
+        if (isBox) el.classList.add('chnr-box');
+      });
+      tmp.querySelectorAll('table').forEach(tbl => {
+        const parent = tbl.parentElement;
+        if (!parent) return;
+        const parentCls = (parent.className || '');
+        if (parentCls.includes('table-container') || parentCls.includes('chnr-table-wrap')) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'chnr-table-wrap';
+        parent.insertBefore(wrap, tbl);
+        wrap.appendChild(tbl);
+      });
+      result = tmp.innerHTML;
+    } catch { /* ignore DOM errors */ }
+    return result.trim();
+  }, [htmlContent]);
+
+  // ── Extract plain text from HTML content for TTS & chunked reader ──
+  // All content (including box content) is included — chunked reader reads everything.
+  // Only tables are excluded (visual data, not suitable for linear TTS).
+  // When htmlContent prop is provided (separate htmlNotes), use it as TTS source
+  // even when isHtmlContent=false (content is plain chunkNotes).
+  const htmlPlainText = useMemo(() => {
+    const htmlSrc = processedExternalHtml || (isHtmlContent ? processedHtmlContent : '');
+    if (!htmlSrc) return '';
+    try {
+      const div = document.createElement('div');
+      div.innerHTML = htmlSrc;
+      div.querySelectorAll('style, script').forEach(el => el.remove());
+      div.querySelectorAll('.chnr-table-wrap, .table-container, table').forEach(el => el.remove());
+      return (div.textContent || div.innerText || '')
+        .replace(/\[span_\d+\]\((start|end)_span\)/g, '')
+        .replace(/\s+/g, ' ').trim();
+    } catch {
+      return htmlSrc
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\[span_\d+\]\((start|end)_span\)/g, '')
+        .replace(/\s+/g, ' ').trim();
+    }
+  }, [content, processedHtmlContent, processedExternalHtml, isHtmlContent]);
+
+  // ── HTML ↔ Chunk mode toggle ──
+  // When preferChunkMode=true, HTML content defaults to tappable chunk reader.
+  // User can still toggle to styled HTML view via a button.
+  const [htmlViewMode, setHtmlViewMode] = useState<'chunk' | 'html'>(() => preferChunkMode ? 'chunk' : 'html');
+  const [showHtmlUnlockPrompt, setShowHtmlUnlockPrompt] = useState(false);
+  // Compute chunk topics from the stripped plain text (for HTML content in chunk mode)
+  const htmlChunkTopics = useMemo(() => {
+    if (!isHtmlContent || !htmlPlainText) return [];
+    return splitIntoTopics(htmlPlainText);
+  }, [isHtmlContent, htmlPlainText]);
+  // The active topic list: use stripped-text topics when showing HTML in chunk mode,
+  // otherwise use the normal topics (from raw content).
+  const activeTopicList = (isHtmlContent && htmlViewMode === 'chunk' && htmlChunkTopics.length > 0)
+    ? htmlChunkTopics
+    : topics;
 
   const [activeIdx, setActiveIdx] = useState<number | null>(initialIndex ?? null);
   const [isReading, setIsReading] = useState(false);
   const isReadingRef = useRef(false);
   useEffect(() => { isReadingRef.current = isReading; }, [isReading]);
+
+  // Voice speed control
+  const [speedIdx, setSpeedIdx] = useState<number>(getStoredSpeedIdx);
+  const speedIdxRef = useRef(speedIdx);
+  useEffect(() => { speedIdxRef.current = speedIdx; }, [speedIdx]);
+  const cycleSpeed = () => {
+    setSpeedIdx(prev => {
+      const next = (prev + 1) % VOICE_SPEEDS.length;
+      try { localStorage.setItem(VOICE_SPEED_KEY, String(next)); } catch {}
+      speedIdxRef.current = next;
+      return next;
+    });
+  };
 
   // Font scaling
   const [fontIdx, setFontIdx] = useState<number>(getStoredFontIdx);
@@ -164,6 +524,51 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
   const [themeMode, setThemeMode] = useState<'light' | 'dark' | 'blue'>(detectMode);
   const [textColor, setTextColor] = useState<string>(() => getStoredColor(detectMode()));
   const [showColorMenu, setShowColorMenu] = useState(false);
+  const [inlineSearch, setInlineSearch] = useState(false);
+  const [inlineQuery, setInlineQuery] = useState('');
+  const [isDesktopMode, setIsDesktopModeLocal] = useState<boolean>(isDesktopModeOn);
+  const [rotateToast, setRotateToast] = useState<string | null>(null);
+
+  // Re-apply desktop mode on orientation/resize changes so it survives rotation
+  useEffect(() => {
+    const reapply = () => {
+      setTimeout(() => {
+        const current = isDesktopModeOn();
+        setDesktopMode(current);
+        setIsDesktopModeLocal(current);
+      }, 400);
+    };
+    window.addEventListener('orientationchange', reapply);
+    window.addEventListener('resize', reapply);
+    return () => {
+      window.removeEventListener('orientationchange', reapply);
+      window.removeEventListener('resize', reapply);
+    };
+  }, []);
+
+  const handleRotate = async () => {
+    const desktopWasOn = isDesktopModeOn();
+    const result = await rotateScreen();
+    if (!result) {
+      setRotateToast('Is device mein screen rotation supported nahi hai');
+      setTimeout(() => setRotateToast(null), 2500);
+    } else {
+      // Re-apply desktop mode after rotation settles
+      setTimeout(() => {
+        if (desktopWasOn) {
+          setDesktopMode(true);
+          setIsDesktopModeLocal(true);
+        }
+      }, 500);
+    }
+  };
+
+  const toggleDesktopMode = () => {
+    const newVal = !isDesktopMode;
+    setDesktopMode(newVal);
+    setIsDesktopModeLocal(newVal);
+    onDesktopModeChange?.(newVal);
+  };
   useEffect(() => {
     if (typeof document === 'undefined') return;
     const obs = new MutationObserver(() => {
@@ -238,7 +643,7 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
 
   const playFrom = useCallback((idx: number) => {
     if (!isReadingRef.current) return;
-    if (idx >= topics.length) {
+    if (idx >= activeTopicList.length) {
       isReadingRef.current = false;
       setIsReading(false);
       setActiveIdx(null);
@@ -250,16 +655,16 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
       itemRefs.current[idx]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }, 60);
     speakText(
-      topics[idx].text,
+      activeTopicList[idx].text,
       undefined,
-      1.0,
+      VOICE_SPEEDS[speedIdxRef.current] ?? 1.0,
       language,
       undefined,
       () => {
         if (isReadingRef.current) playFrom(idx + 1);
       }
     );
-  }, [topics, language]);
+  }, [activeTopicList, language]);
 
   // Stable ref to the latest onReadingStart so we can call it from startFromIndex
   // without making the callback identity unstable.
@@ -267,7 +672,7 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
   useEffect(() => { onReadingStartRef.current = onReadingStart; }, [onReadingStart]);
 
   const startFromIndex = useCallback((startIdx: number) => {
-    if (topics.length === 0) return;
+    if (activeTopicList.length === 0) return;
     stopSpeech();
     isReadingRef.current = true;
     setIsReading(true);
@@ -277,7 +682,7 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
     }
     // Defer to next tick so cancel() flushes before speak()
     setTimeout(() => playFrom(startIdx), 80);
-  }, [playFrom, topics.length]);
+  }, [playFrom, activeTopicList.length]);
 
   const stopAll = useCallback(() => {
     isReadingRef.current = false;
@@ -286,18 +691,19 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
     stopSpeech();
   }, []);
 
-  // Stop on unmount or when content changes
+  // Stop on unmount — skip if background play mode is active
   useEffect(() => {
     return () => {
+      if ((window as any).__nst_bg_tts__) return;
       isReadingRef.current = false;
       stopSpeech();
     };
   }, []);
 
-  // Stop TTS when user switches browser tab
+  // Stop TTS when user switches browser tab — skip if background play mode is active
   useEffect(() => {
     const handleVisibility = () => {
-      if (document.hidden && isReadingRef.current) {
+      if (document.hidden && isReadingRef.current && !(window as any).__nst_bg_tts__) {
         stopAll();
       }
     };
@@ -328,7 +734,7 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
       if (isReadingRef.current) stopAll();
       return;
     }
-    if (topics.length === 0) return;
+    if (activeTopicList.length === 0) return;
     const t = setTimeout(() => startFromIndex(0), 200);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -341,13 +747,13 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
   useEffect(() => {
     const q = (searchQuery || '').trim().toLowerCase();
     if (!q) return;
-    if (topics.length === 0) return;
+    if (activeTopicList.length === 0) return;
     // Avoid re-firing for the same query on incidental re-renders.
-    const sig = `${q}::${topics.length}`;
+    const sig = `${q}::${activeTopicList.length}`;
     if (searchHandledRef.current === sig) return;
     searchHandledRef.current = sig;
 
-    const matchIdx = topics.findIndex(t => (t.text || '').toLowerCase().includes(q));
+    const matchIdx = activeTopicList.findIndex(t => (t.text || '').toLowerCase().includes(q));
     if (matchIdx < 0) return;
     const t = setTimeout(() => {
       itemRefs.current[matchIdx]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -357,7 +763,7 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, content]);
 
-  if (topics.length === 0) {
+  if (!isHtmlContent && activeTopicList.length === 0) {
     return (
       <div className={`text-center py-10 text-slate-400 ${className || ''}`}>
         <BookOpen size={36} className="mx-auto mb-2 opacity-40" />
@@ -366,8 +772,118 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
     );
   }
 
+  // ── HTML NOTES MODE — render HTML directly, no chunking ──
+  // Only enter this path when htmlViewMode === 'html'. If 'chunk', fall through
+  // to the normal tappable chunk reader (using stripped plain text topics).
+  // Also enters this path when an external htmlContent prop is provided (note has
+  // separate chunkNotes + htmlNotes fields) and user switches to HTML view.
+  const hasHtmlToShow = isHtmlContent || !!htmlContent?.trim();
+  if (hasHtmlToShow && htmlViewMode === 'html') {
+    const handleHtmlReadAll = () => {
+      if (isReading) {
+        try { if (navigator.vibrate) navigator.vibrate(30); } catch {}
+        stopSpeech();
+        setIsReading(false);
+      } else {
+        try { if (navigator.vibrate) navigator.vibrate(50); } catch {}
+        setIsReading(true);
+        if (onReadingStart) onReadingStart();
+        speakText(htmlPlainText, language)
+          .then(() => { setIsReading(false); if (onComplete) onComplete(); })
+          .catch(() => setIsReading(false));
+      }
+    };
+    const readAllBtn = (
+      <button
+        onClick={handleHtmlReadAll}
+        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider shadow-sm active:scale-95 transition shrink-0 ${isReading ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
+      >
+        {isReading ? <><Square size={13} /> Stop</> : <><Volume2 size={13} /> Read All</>}
+      </button>
+    );
+    return (
+      <div className={className || ''}>
+        <style>{`
+          .chnr-html{overflow-x:hidden;width:100%;box-sizing:border-box}
+          :where(.chnr-html) *{min-width:0;box-sizing:border-box}
+          :where(.chnr-html) h1{color:#7c3aed;font-size:1.08em;font-weight:900;margin:11px 0 5px;border-bottom:2px solid #e9d5ff;padding-bottom:3px}
+          :where(.chnr-html) h2{color:#6d28d9;font-size:1em;font-weight:800;margin:10px 0 4px}
+          :where(.chnr-html) h3{color:#7c3aed;font-size:0.93em;font-weight:700;margin:8px 0 3px}
+          :where(.chnr-html) h4,:where(.chnr-html) h5,:where(.chnr-html) h6{color:#8b5cf6;font-size:0.88em;font-weight:700;margin:6px 0 2px}
+          :where(.chnr-html) p{margin:3px 0;line-height:1.55;word-break:break-word;overflow-wrap:break-word}
+          :where(.chnr-html) ul{padding-left:16px;margin:4px 0;list-style:disc}
+          :where(.chnr-html) ol{padding-left:16px;margin:4px 0;list-style:decimal}
+          :where(.chnr-html) li{margin:2px 0;line-height:1.55;word-break:break-word;overflow-wrap:break-word}
+          :where(.chnr-html) .box,:where(.chnr-html) .note-box,:where(.chnr-html) .highlight-box{background:#f5f3ff;border:1.5px solid #ddd6fe;border-radius:7px;padding:5px 9px;margin:5px 0;font-size:0.82em;line-height:1.5;word-break:break-word;overflow-wrap:break-word}
+          :where(.chnr-html) .warning-box{background:#fffbeb;border:1.5px solid #fde68a;border-radius:7px;padding:5px 9px;margin:5px 0;font-size:0.82em;line-height:1.5;word-break:break-word;overflow-wrap:break-word}
+          :where(.chnr-html) .success-box{background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:7px;padding:5px 9px;margin:5px 0;font-size:0.82em;line-height:1.5;word-break:break-word;overflow-wrap:break-word}
+          :where(.chnr-html) strong,:where(.chnr-html) b{font-weight:800}
+          :where(.chnr-html) hr{border:none;border-top:1.5px solid #e9d5ff;margin:9px 0}
+          :where(.chnr-html) table{border-collapse:collapse;margin:6px 0;font-size:0.82em;width:100%}
+          :where(.chnr-html) th{background:#7c3aed;color:white;padding:4px 8px;text-align:left;word-break:break-word;overflow-wrap:break-word}
+          :where(.chnr-html) td{padding:3px 8px;border:1px solid #e2e8f0;word-break:break-word;overflow-wrap:break-word;vertical-align:top}
+          :where(.chnr-html) tr:nth-child(even) td{background:#f8f5ff}
+          :where(.chnr-html) .no-break{white-space:nowrap}
+          :where(.chnr-html) .note-item{word-break:break-word;overflow-wrap:break-word;text-align:left}
+          :where(.chnr-html) .chnr-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;margin:8px 0}
+          :where(.chnr-html) .table-container{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%}
+          :where(.chnr-html) img{max-width:100%;height:auto}
+          :where(.chnr-html) div[style*="display:grid"],:where(.chnr-html) div[style*="display: grid"],:where(.chnr-html) div[style*="display:flex"],:where(.chnr-html) div[style*="display: flex"]{overflow:hidden}
+          .chnr-html .container,.chnr-html [class*="container"]{max-width:100%!important;width:auto!important;box-sizing:border-box!important;margin-left:0!important;margin-right:0!important}
+          .chnr-html body{max-width:100%!important}
+        `}</style>
+        {/* Toolbar with HTML badge + TTS Reader toggle */}
+        {!hideTopBar && (
+          <div className="sticky top-0 z-20 bg-white py-2 mb-3 border-b border-slate-200 shadow-sm">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="text-xs font-bold text-slate-600 truncate flex-1 min-w-0">
+                {topBarLabel || 'Notes'}
+              </div>
+              <span className="text-[9px] font-black text-violet-500 bg-violet-50 border border-violet-200 px-1.5 py-0.5 rounded-full uppercase shrink-0">HTML</span>
+              {preferChunkMode && (
+                <button
+                  onClick={() => { stopSpeech(); setIsReading(false); setHtmlViewMode('chunk'); }}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-black bg-amber-500 text-white border border-amber-600 shrink-0 active:scale-95 transition-all"
+                  title="TTS tappable reader mein switch karo"
+                >
+                  <Volume2 size={10} /> TTS
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        {hideTopBar && preferChunkMode && (
+          <div className="flex justify-end mb-1">
+            <button
+              onClick={() => { stopSpeech(); setIsReading(false); setHtmlViewMode('chunk'); }}
+              className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-black bg-amber-500 text-white border border-amber-600 active:scale-95 transition-all"
+              title="TTS tappable reader mein switch karo"
+            >
+              <Volume2 size={10} /> TTS Reader
+            </button>
+          </div>
+        )}
+        {/* HTML content rendered directly — single render only, no duplicate below */}
+        {/* processedExternalHtml = htmlContent prop run through full pipeline (body-extract,
+            style-strip, table-wrap). processedHtmlContent = same pipeline on content prop.
+            Both paths strip <style>/<script> and handle full-HTML docs safely. */}
+        <div
+          className="chnr-html px-1"
+          dangerouslySetInnerHTML={{ __html: processedExternalHtml || processedHtmlContent }}
+          style={{ fontSize: '13.5px', lineHeight: '1.55', color: '#1e293b' }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className={className || ''}>
+      {/* Rotate toast notification */}
+      {rotateToast && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[9999] bg-slate-800 text-white text-xs font-bold px-4 py-2 rounded-xl shadow-lg animate-in fade-in pointer-events-none">
+          {rotateToast}
+        </div>
+      )}
       {/* Centered Reading Style popover (Portal-based, viewport-centred).
           Tapping the small Type ("T") button in the top bar opens this same
           popup — same as PdfView's outer "Aa" button — so the experience is
@@ -377,7 +893,30 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
           NOTE: Must be fully opaque (`bg-white`) — earlier `bg-white/95` +
           backdrop-blur let the scrolling notes content bleed visibly behind
           the READ ALL bar, which broke readability. We also bump z-index so
-          this bar always sits above scrolled content. */}
+          this bar always sits above scrolled content.
+          When hideTopBar=true, only the READ ALL button is shown (compact sticky bar). */}
+      {hideTopBar && !suppressStickyControls && (
+        <div className="sticky top-0 z-20 mb-2">
+          <button
+            onClick={() => {
+              if (isReading) {
+                try { if (navigator.vibrate) navigator.vibrate(30); } catch {}
+                stopAll();
+              } else {
+                try { if (navigator.vibrate) navigator.vibrate(50); } catch {}
+                startFromIndex(initialIndex ?? 0);
+              }
+            }}
+            className={`w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-black uppercase tracking-wider shadow-md active:scale-95 transition ${
+              isReading
+                ? 'bg-red-600 text-white'
+                : 'bg-indigo-600 text-white'
+            }`}
+          >
+            {isReading ? <><Square size={13} /> Stop</> : initialIndex ? <><Volume2 size={13} /> Continue</> : <><Volume2 size={13} /> Read All</>}
+          </button>
+        </div>
+      )}
       {!hideTopBar && (
         <div className="sticky top-0 z-20 bg-white py-2 mb-3 border-b border-slate-200 shadow-sm">
           <div className="flex items-center justify-between gap-2">
@@ -385,8 +924,8 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
               {topBarLabel || 'Notes'}
               <span className="text-slate-400 font-medium ml-2">
                 {isReading && activeIdx !== null
-                  ? `${activeIdx + 1} / ${topics.length}`
-                  : `${topics.length} topics`}
+                  ? `${activeIdx + 1} / ${activeTopicList.length}`
+                  : `${activeTopicList.length} topics`}
               </span>
             </div>
 
@@ -497,6 +1036,39 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
                 )}
               </div>
 
+              {/* Inline Search button */}
+              <button
+                type="button"
+                onClick={() => { setInlineSearch(s => !s); setInlineQuery(''); }}
+                className={`p-1.5 rounded-lg transition flex items-center gap-1 ${inlineSearch ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 active:bg-slate-300'}`}
+                title="Notes mein search karein"
+                aria-label="Search notes"
+              >
+                <Search size={14} />
+              </button>
+
+              {/* Rotate Screen button */}
+              <button
+                type="button"
+                onClick={handleRotate}
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 active:bg-slate-300 transition flex items-center gap-1"
+                title="Screen rotate karein"
+                aria-label="Rotate screen"
+              >
+                <RotateCcw size={14} className="text-slate-600" />
+              </button>
+
+              {/* Voice Speed Button */}
+              <button
+                type="button"
+                onClick={cycleSpeed}
+                className="shrink-0 px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 active:bg-slate-300 transition text-[10px] font-black text-slate-700 whitespace-nowrap"
+                title="Voice speed badlein"
+                aria-label={`Speed: ${SPEED_LABELS[speedIdx]}`}
+              >
+                {SPEED_LABELS[speedIdx]}
+              </button>
+
               <button
                 onClick={() => {
                   if (isReading) {
@@ -515,14 +1087,109 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
               >
                 {isReading ? <><Square size={13} /> Stop</> : initialIndex ? <><Volume2 size={13} /> Continue</> : <><Volume2 size={13} /> Read All</>}
               </button>
+
+              {/* Ultra View button — Ultra plan only, no credits */}
+              {hasHtmlToShow && (
+                isUltraUser ? (
+                  <button
+                    type="button"
+                    onClick={() => { stopAll(); setHtmlViewMode('html'); onHtmlOpen?.(); }}
+                    className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg bg-violet-50 hover:bg-violet-100 text-violet-600 border border-violet-200 text-[10px] font-black active:scale-95 transition"
+                    title="Ultra View — styled HTML notes"
+                  >
+                    ⚡ Ultra
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setShowHtmlUnlockPrompt(true)}
+                      className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-100 text-slate-400 border border-slate-200 text-[10px] font-black active:scale-95 transition"
+                      title="Ultra plan required"
+                    >
+                      🔒 Ultra
+                    </button>
+                    {showHtmlUnlockPrompt && (
+                      <div className="fixed inset-0 z-[9999] flex items-center justify-center px-4" style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(6px)' }} onClick={() => setShowHtmlUnlockPrompt(false)}>
+                        <div className="bg-white rounded-3xl p-6 w-full max-w-xs shadow-2xl" onClick={e => e.stopPropagation()}>
+                          <p className="text-3xl text-center mb-2">⚡</p>
+                          <h3 className="font-black text-slate-800 text-center text-base mb-1">Ultra Plan Required</h3>
+                          <p className="text-xs text-slate-500 text-center mb-5">Ye feature sirf Ultra subscribers ke liye hai. Upgrade karke styled HTML notes ka full experience lo.</p>
+                          <button onClick={() => setShowHtmlUnlockPrompt(false)} className="w-full py-2.5 bg-violet-600 text-white rounded-2xl font-black text-sm active:scale-95 transition">OK, Samajh Gaya</button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )
+              )}
             </div>
           </div>
         </div>
       )}
 
+      {/* Inline search panel */}
+      {inlineSearch && (
+        <div className="sticky top-[52px] z-10 bg-white border-b border-slate-100 px-0 pb-2 mb-2 animate-in fade-in slide-in-from-top-1 duration-150">
+          <div className="relative mb-2">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-400 pointer-events-none" />
+            <input
+              autoFocus
+              type="text"
+              value={inlineQuery}
+              onChange={e => setInlineQuery(e.target.value)}
+              placeholder="Koi topic ya line dhundho..."
+              className="w-full pl-8 pr-8 py-2 text-sm border border-blue-200 rounded-xl bg-blue-50/50 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 placeholder:text-slate-400"
+            />
+            {inlineQuery && (
+              <button
+                onClick={() => setInlineQuery('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              >✕</button>
+            )}
+          </div>
+          {inlineQuery.trim() && (() => {
+            const q = inlineQuery.trim().toLowerCase();
+            const hits = activeTopicList
+              .map((t, idx) => ({ t, idx }))
+              .filter(({ t }) => !t.isHeading && (t.text || '').toLowerCase().includes(q))
+              .slice(0, 10);
+            if (hits.length === 0) return (
+              <p className="text-center text-xs text-slate-400 py-2">Koi result nahi mila</p>
+            );
+            return (
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {hits.map(({ t, idx }) => {
+                  const txt = t.text || '';
+                  const qi = txt.toLowerCase().indexOf(q);
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        setInlineSearch(false);
+                        setInlineQuery('');
+                        setTimeout(() => {
+                          itemRefs.current[idx]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          startFromIndex(idx);
+                        }, 100);
+                      }}
+                      className="w-full text-left px-3 py-2 rounded-lg bg-blue-50 hover:bg-blue-100 active:bg-blue-200 transition text-xs text-slate-700 line-clamp-2"
+                    >
+                      <span className="text-[10px] text-blue-500 font-bold mr-1">#{idx + 1}</span>
+                      {qi > 0 && <span>{txt.slice(0, qi)}</span>}
+                      <mark className="bg-yellow-200 text-slate-800 rounded px-0.5">{txt.slice(qi, qi + q.length)}</mark>
+                      <span>{txt.slice(qi + q.length)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* Topic list — tap any line to start TTS from that line */}
       <div className="space-y-1.5">
-        {topics.map((topic, idx) => {
+        {activeTopicList.map((topic, idx) => {
           const isActive = isReading && activeIdx === idx;
           // Headings are non-readable so keep them as static blocks.
           if (topic.isHeading) {

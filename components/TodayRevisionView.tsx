@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User, TopicItem } from '../types';
-import { X, Play, BookOpen, CheckCircle, Loader2, Pause, Volume2, SkipForward } from 'lucide-react';
+import { X, Play, BookOpen, CheckCircle, Loader2, Pause, Volume2, SkipForward, FileText } from 'lucide-react';
 import { getChapterData } from '../firebase';
 import { storage } from '../utils/storage';
 import { DEFAULT_SUBJECTS } from '../constants';
 import { SpeakButton } from './SpeakButton';
 import { formatMcqNotes, findRelevantNote } from '../utils/noteFormatter';
+import { ChunkedNotesReader } from './ChunkedNotesReader';
 
 interface Props {
     user: User;
@@ -50,6 +51,7 @@ export const TodayRevisionView: React.FC<Props> = ({ user, topics, onClose, onCo
 
     // Topics without Notes (Self Study)
     const [missingNoteTopics, setMissingNoteTopics] = useState<LoadedTopic[]>([]);
+    const [chunkTopics, setChunkTopics] = useState<Set<string>>(new Set());
 
 
     const userBoard = user.board || 'CBSE';
@@ -325,6 +327,17 @@ export const TodayRevisionView: React.FC<Props> = ({ user, topics, onClose, onCo
                                             <p className="text-xs text-slate-500 font-bold mt-1 uppercase">{topic.chapterName}</p>
                                         </div>
                                         <div className="flex gap-2 items-center">
+                                            <button
+                                                onClick={() => setChunkTopics(prev => {
+                                                    const next = new Set(prev);
+                                                    if (next.has(topic.id)) next.delete(topic.id); else next.add(topic.id);
+                                                    return next;
+                                                })}
+                                                className={`p-2 rounded-full transition-all flex items-center gap-1 ${chunkTopics.has(topic.id) ? 'bg-amber-100 text-amber-700 ring-2 ring-amber-400' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                                                title={chunkTopics.has(topic.id) ? 'Styled Notes mein switch karo' : 'TTS Reader mein switch karo'}
+                                            >
+                                                {chunkTopics.has(topic.id) ? <FileText size={18} /> : <Volume2 size={18} />}
+                                            </button>
                                             <SpeakButton
                                                 text={topic.plainText}
                                                 className="bg-indigo-50 text-indigo-600 hover:bg-indigo-100"
@@ -353,11 +366,26 @@ export const TodayRevisionView: React.FC<Props> = ({ user, topics, onClose, onCo
                                         </div>
                                     </div>
 
-                                    {/* CONTENT CONTAINER FOR TTS */}
-                                    <div
-                                        className="prose prose-sm prose-slate max-w-none text-justify"
-                                        dangerouslySetInnerHTML={{ __html: topic.content }}
-                                    />
+                                    {/* CONTENT CONTAINER — styled HTML or ChunkedNotesReader */}
+                                    {chunkTopics.has(topic.id) ? (
+                                        <ChunkedNotesReader
+                                            key={`trv-chunk-${topic.id}`}
+                                            content={topic.plainText || topic.content
+                                                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                                                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                                                .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+                                                .replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ')
+                                                .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()}
+                                            topBarLabel={topic.name}
+                                            hideTopBar={false}
+                                            preferChunkMode
+                                        />
+                                    ) : (
+                                        <div
+                                            className="prose prose-sm prose-slate max-w-none text-justify"
+                                            dangerouslySetInnerHTML={{ __html: topic.content }}
+                                        />
+                                    )}
                                 </div>
                             );
                         })}

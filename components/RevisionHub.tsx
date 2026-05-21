@@ -13,6 +13,7 @@ import { TopicChart } from './TopicChart';
 import { RevisionDonutChart } from './RevisionDonutChart';
 import { WeakAverageNotesView } from './WeakAverageNotesView';
 import { speakWithHighlight } from '../utils/ttsHighlighter';
+import { ChunkedNotesReader } from './ChunkedNotesReader';
 import { LEVEL_UP_CONFIG } from '../constants';
 import { MarksheetCard } from './MarksheetCard'; // Import MarksheetCard
 import { MonthlyMarksheet } from './MonthlyMarksheet'; // Import MonthlyMarksheet
@@ -113,6 +114,7 @@ const RevisionHubComponent: React.FC<Props> = ({ user, onTabChange, settings, on
     // ---- INLINE NOTES PREVIEW LOADER (Today's Tasks list) ----
     const [pendingNotesContent, setPendingNotesContent] = useState<Record<string, string>>({});
     const [expandedPendingNote, setExpandedPendingNote] = useState<string | null>(null);
+    const [noteChunkMode, setNoteChunkMode] = useState<Set<string>>(new Set());
 
     useEffect(() => {
         if (activeFilter !== 'TODAY' || pendingNotes.length === 0) return;
@@ -1189,10 +1191,40 @@ const RevisionHubComponent: React.FC<Props> = ({ user, onTabChange, settings, on
                                                         </div>
                                                     </button>
                                                     {isExpanded && hasContent && (
-                                                        <div
-                                                            className="prose prose-sm prose-slate max-w-none text-justify mt-3 pt-3 border-t border-slate-200 text-slate-700 animate-in fade-in slide-in-from-top-1 duration-200"
-                                                            dangerouslySetInnerHTML={{ __html: noteHtml }}
-                                                        />
+                                                        <div className="mt-3 pt-3 border-t border-slate-200 animate-in fade-in slide-in-from-top-1 duration-200">
+                                                            <div className="flex justify-end mb-2">
+                                                                <button
+                                                                    onClick={() => setNoteChunkMode(prev => {
+                                                                        const next = new Set(prev);
+                                                                        if (next.has(cacheKey)) next.delete(cacheKey); else next.add(cacheKey);
+                                                                        return next;
+                                                                    })}
+                                                                    className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-black transition-all border ${noteChunkMode.has(cacheKey) ? 'bg-amber-500 text-white border-amber-500 shadow-sm' : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'}`}
+                                                                    title={noteChunkMode.has(cacheKey) ? 'Styled Notes mein switch karo' : 'TTS Reader mein switch karo'}
+                                                                >
+                                                                    {noteChunkMode.has(cacheKey) ? <FileText size={12} /> : <Volume2 size={12} />}
+                                                                </button>
+                                                            </div>
+                                                            {noteChunkMode.has(cacheKey) ? (
+                                                                <ChunkedNotesReader
+                                                                    key={`hub-chunk-${cacheKey}`}
+                                                                    content={noteHtml
+                                                                        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                                                                        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                                                                        .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+                                                                        .replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ')
+                                                                        .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()}
+                                                                    topBarLabel={t.name}
+                                                                    hideTopBar={false}
+                                                                    preferChunkMode
+                                                                />
+                                                            ) : (
+                                                                <div
+                                                                    className="prose prose-sm prose-slate max-w-none text-justify text-slate-700"
+                                                                    dangerouslySetInnerHTML={{ __html: noteHtml }}
+                                                                />
+                                                            )}
+                                                        </div>
                                                     )}
                                                 </div>
                                             );

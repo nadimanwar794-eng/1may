@@ -65,6 +65,20 @@ export const stripHtml = (html: string): string => {
         clean = clean.normalize('NFC');
     }
 
+    // Strip emoji / pictographic stickers (📌 ✅ 🔥 🎯 etc.) — TTS engines either
+    // skip them silently (causing a pause) or read out garbled codepoints.
+    // Using \p{Extended_Pictographic} with the Unicode 'u' flag covers all emoji
+    // blocks across all planes (U+1F300–U+1FAFF, U+2600–U+27BF, etc.).
+    try {
+        clean = clean.replace(/\p{Extended_Pictographic}/gu, ' ');
+    } catch (_) {
+        // Fallback for older engines that don't support Unicode property escapes
+        clean = clean.replace(/[\u2600-\u27BF]/g, ' ');
+        clean = clean.replace(/[\uD83C-\uDBFF][\uDC00-\uDFFF]/g, ' ');
+    }
+    // Also strip any stray variation selectors left after emoji removal
+    clean = clean.replace(/[\uFE00-\uFE0F\u20D0-\u20FF]/g, '');
+
     // Remove zero-width and invisible Unicode control chars that confuse TTS engines
     // (zero-width space, zero-width joiner/non-joiner, BOM, etc.)
     clean = clean.replace(/[\u200B\u200C\u200D\u200E\u200F\u2028\u2029\uFEFF]/g, '');

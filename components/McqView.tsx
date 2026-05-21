@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Chapter, User, Subject, SystemSettings, MCQResult, PerformanceTag } from '../types';
-import { CheckCircle, Lock, ArrowLeft, Crown, PlayCircle, HelpCircle, Trophy, Clock, BrainCircuit, FileText, Layers, BookOpen, Eye, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
+import { CheckCircle, Lock, ArrowLeft, Crown, PlayCircle, HelpCircle, Trophy, Clock, BrainCircuit, FileText, Layers, BookOpen, Eye, RefreshCw, ChevronDown, ChevronUp, Send } from 'lucide-react';
 import { checkFeatureAccess } from '../utils/permissionUtils';
 import { CustomAlert, CustomConfirm } from './CustomDialogs';
 import { getChapterData, saveUserToLive, saveUserHistory, savePublicActivity } from '../firebase';
@@ -11,7 +11,7 @@ import { LessonView } from './LessonView';
 import { MarksheetCard } from './MarksheetCard';
 import { AiInterstitial } from './AiInterstitial';
 import { FlashcardMcqView } from './FlashcardMcqView';
-import { McqSpeakButtons } from './McqSpeakButtons';
+import { McqSpeakButtons, getStoredTtsSpeed, setStoredTtsSpeed } from './McqSpeakButtons';
 import { recordAttempt as recordRevisionAttempt } from '../utils/revisionTrackerV2';
 import { addMistakes, removeMistakeByQuestion } from '../utils/mistakeBank';
 
@@ -140,10 +140,14 @@ interface Props {
   topicFilter?: string; // NEW: Filter by Topic
   // NEW: Lucent-style cross-tab switch back to Notes (PdfView).
   onSwitchToNotes?: () => void;
+  // NEW: Share MCQ to community popup
+  onShareToCommunity?: (mcq: { question: string; options: [string,string,string,string]; correctAnswer: number; explanation: string }) => void;
+  /** When true, hides sticky headers for distraction-free focus mode */
+  hideHeader?: boolean;
 }
 
 export const McqView: React.FC<Props> = ({ 
-  chapter, subject, user, board, classLevel, stream, onBack, onUpdateUser, settings, topicFilter, onSwitchToNotes
+  chapter, subject, user, board, classLevel, stream, onBack, onUpdateUser, settings, topicFilter, onSwitchToNotes, onShareToCommunity, hideHeader
 }) => {
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<'SELECTION' | 'PRACTICE' | 'TEST' | 'FLASHCARD' | 'INTERACTIVE_LIST'>('SELECTION');
@@ -156,6 +160,20 @@ export const McqView: React.FC<Props> = ({
   const [listMode, setListMode] = useState<'mcq' | 'qa'>('mcq');
   const [listAnswers, setListAnswers] = useState<Record<number, number>>({});
   const [listRevealed, setListRevealed] = useState<Record<number, boolean>>({});
+  const [listSubmitted, setListSubmitted] = useState(false);
+  const [listTimerSeconds, setListTimerSeconds] = useState(0);
+  const [listStarted, setListStarted] = useState(false);
+  const listTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const TTS_SPEEDS_MCQ = [1.0, 1.25, 1.5, 2.0, 0.75];
+  const [ttsRate, setTtsRate] = useState<number>(() => getStoredTtsSpeed());
+  const cycleTtsRate = () => {
+      setTtsRate(prev => {
+          const idx = TTS_SPEEDS_MCQ.indexOf(prev);
+          const next = TTS_SPEEDS_MCQ[(idx + 1) % TTS_SPEEDS_MCQ.length];
+          setStoredTtsSpeed(next);
+          return next;
+      });
+  };
   const [savedQuestions, setSavedQuestions] = useState<Record<number, boolean>>({});
   // Lucent-style 3-mode picker on the SELECTION screen.
   // 'MCQ'  → opens INTERACTIVE_LIST in 'mcq' mode (interactive, tap-to-answer)
@@ -189,6 +207,17 @@ export const McqView: React.FC<Props> = ({
 
   // NEW: MCQ Mode State (Free vs Premium Experience)
   const [mcqMode, setMcqMode] = useState<'FREE' | 'PREMIUM'>('FREE');
+
+  // Timer for ALL users in INTERACTIVE_LIST MCQ mode — starts on first answer, stops on submit
+  useEffect(() => {
+      if (viewMode !== 'INTERACTIVE_LIST' || listMode !== 'mcq' || !listStarted || listSubmitted) {
+          if (listTimerRef.current) { clearInterval(listTimerRef.current); listTimerRef.current = null; }
+          return;
+      }
+      listTimerRef.current = setInterval(() => setListTimerSeconds(s => s + 1), 1000);
+      return () => { if (listTimerRef.current) { clearInterval(listTimerRef.current); listTimerRef.current = null; } };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode, listMode, listStarted, listSubmitted]);
 
   // Load topics on mount if content exists locally or via minimal fetch.
   // Uses the same resilient/normalized lookup so topic chips show up even when
@@ -246,6 +275,10 @@ export const McqView: React.FC<Props> = ({
       setListMode(initialMode);
       setListAnswers({});
       setListRevealed({});
+      setListSubmitted(false);
+      setListTimerSeconds(0);
+      setListStarted(false);
+      if (listTimerRef.current) { clearInterval(listTimerRef.current); listTimerRef.current = null; }
       setViewMode('INTERACTIVE_LIST');
       setLoading(false);
   };
@@ -293,7 +326,33 @@ export const McqView: React.FC<Props> = ({
           if (user.subscriptionLevel === 'BASIC') dailyLimit = mcqFeature?.limits?.basic ?? settings?.mcqLimitBasic ?? 50;
           if (user.subscriptionLevel === 'ULTRA') dailyLimit = mcqFeature?.limits?.ultra ?? settings?.mcqLimitUltra ?? 100;
 
-          if (solvedToday >= dailyLimit) {
+          // FREE users: hard daily limit
+          if (!user.subscriptionLevel && solvedToday >= dailyLimit) {
+              setAlertConfig({
+                  isOpen: true,
+                  title: "Daily Limit Reached",
+                  message: `Aaj ke ${dailyLimit} free MCQ ho gaye!\n\nPlan upgrade karo ya kal vapas aao.`
+              });
+              return;
+          }
+
+          // BASIC / ULTRA users: after free quota, charge 5 credits per session (30 questions)
+          if (user.subscriptionLevel && solvedToday >= 50) {
+              const mcqCostPerBlock = 5;
+              if (user.credits < mcqCostPerBlock) {
+                  setAlertConfig({
+                      isOpen: true,
+                      title: "Low Balance",
+                      message: `Aaj ke 50 free MCQ use ho gaye! Aur MCQ ke liye ${mcqCostPerBlock} coins chahiye.`
+                  });
+                  return;
+              }
+              // Charge 5 credits for this session
+              const updatedUser = { ...user, credits: user.credits - mcqCostPerBlock };
+              localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
+              saveUserToLive(updatedUser);
+              onUpdateUser(updatedUser);
+          } else if (solvedToday >= dailyLimit) {
               setAlertConfig({
                   isOpen: true,
                   title: "Daily Limit Reached",
@@ -814,7 +873,7 @@ export const McqView: React.FC<Props> = ({
       });
 
       // Show Marksheet and exit MCQ view
-      setResultData(resultDataToSet);
+      setResultData(null);
       setViewMode('SELECTION');
   };
 
@@ -1012,10 +1071,51 @@ export const McqView: React.FC<Props> = ({
               }));
               const totalAnswered = Object.keys(listAnswers).length;
               const allAnswered = totalAnswered === norm.length && norm.length > 0;
-              // TTS reveal rule (per user spec):
-              //  - MCQ mode: only reveal answer once user answered everything.
-              //  - Q&A mode: always reveal answer in TTS.
-              const ttsRevealAnswer = listMode === 'qa' || allAnswered;
+              // TTS reveal rule: only reveal after submit in MCQ mode, always in Q&A mode
+              const ttsRevealAnswer = listMode === 'qa' || listSubmitted;
+              // Exam-mode: show 30-MCQ nudge notification
+              const show30McqNudge = listMode === 'mcq' && !listSubmitted && totalAnswered === 30 && !allAnswered;
+
+              // Submit handler: record mistakes for wrong answers only after submit
+              const handleSubmit = () => {
+                  if (listSubmitted) return;
+                  norm.forEach((q, i) => {
+                      const selected = listAnswers[i];
+                      if (selected === undefined) return;
+                      try {
+                          if (selected !== q.correctAnswer) {
+                              addMistakes([{
+                                  question: q.question,
+                                  options: q.options || [],
+                                  correctAnswer: q.correctAnswer,
+                                  explanation: q.explanation,
+                                  topic: q.topic,
+                                  chapterTitle: chapter.title,
+                                  subjectName: subject.name,
+                                  classLevel: classLevel,
+                                  board: board,
+                                  source: 'MCQ',
+                              }]);
+                          } else {
+                              removeMistakeByQuestion(q.question, q.correctAnswer);
+                          }
+                      } catch {}
+                  });
+                  setListSubmitted(true);
+                  // Auto-record revision attempt on submit
+                  try {
+                      recordRevisionAttempt({
+                          subjectId: subject.id || subject.name,
+                          subjectName: subject.name,
+                          chapterId: chapter.id,
+                          chapterTitle: chapter.title,
+                          pageKey: chapter.id,
+                          pageLabel: chapter.title,
+                          questions: norm as any,
+                          userAnswers: norm.map((_, i) => listAnswers[i] === undefined ? null : listAnswers[i]) as any,
+                      });
+                  } catch {}
+              };
               const correctCount = norm.reduce((acc, q, i) =>
                   acc + (listAnswers[i] === q.correctAnswer ? 1 : 0), 0);
               const wrongCount = totalAnswered - correctCount;
@@ -1028,7 +1128,7 @@ export const McqView: React.FC<Props> = ({
               return (
                   <div className="bg-slate-50 min-h-screen pb-24 animate-in fade-in slide-in-from-right-8">
                       {/* Sticky Header: back · title · READ ALL */}
-                      <div className="sticky top-0 z-20 bg-white border-b border-slate-100 shadow-sm">
+                      <div className={`sticky top-0 z-20 bg-white border-b border-slate-100 shadow-sm transition-all duration-200 ${hideHeader ? 'hidden' : ''}`}>
                           <div className="p-3 flex items-center gap-2">
                               <button
                                   onClick={() => {
@@ -1065,25 +1165,40 @@ export const McqView: React.FC<Props> = ({
                                   <p className="text-[10px] font-black text-purple-600 uppercase tracking-wider">{listMode === 'qa' ? 'Q&A Mode' : 'MCQ Practice'}</p>
                                   <h3 className="font-black text-slate-800 leading-tight line-clamp-1 text-base">{chapter.title}</h3>
                               </div>
-                              {/* READ ALL — chain reader; respects ttsRevealAnswer */}
-                              {norm.length > 0 && (
-                                  <McqSpeakButtons
-                                      question={norm[0].question}
-                                      options={norm[0].options}
-                                      correctAnswer={norm[0].correctAnswer}
-                                      allQuestions={norm as any}
-                                      index={0}
-                                      revealAnswer={ttsRevealAnswer}
-                                      iconSize={14}
-                                      className=""
-                                  />
-                              )}
+                              {/* Speed control + READ ALL chain reader */}
+                              <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                      onClick={cycleTtsRate}
+                                      className="flex items-center px-2 py-1.5 rounded-full bg-orange-50 text-orange-700 hover:bg-orange-100 active:bg-orange-200 transition-colors font-black text-[10px] uppercase tracking-wider border border-orange-200"
+                                      title={`TTS Speed: ${ttsRate}x — tap to change`}
+                                      aria-label="TTS speed"
+                                  >
+                                      ×{ttsRate === 1 ? '1' : ttsRate}
+                                  </button>
+                                  {norm.length > 0 && (
+                                      <McqSpeakButtons
+                                          question={norm[0].question}
+                                          options={norm[0].options}
+                                          correctAnswer={norm[0].correctAnswer}
+                                          allQuestions={norm as any}
+                                          index={0}
+                                          revealAnswer={ttsRevealAnswer}
+                                          iconSize={14}
+                                          rate={ttsRate}
+                                          className=""
+                                      />
+                                  )}
+                              </div>
                           </div>
-                          {/* Counter row + 3-pill mode switcher */}
+                          {/* Counter row + timer + 3-pill mode switcher */}
                           <div className="px-3 pb-3 flex items-center gap-2">
-                              <div className="text-[11px] font-bold text-slate-600 shrink-0">
-                                  <span className="text-slate-800 font-black">{Math.min(totalAnswered + 1, norm.length)} / {norm.length}</span>
-                                  <span className="ml-1 text-slate-500">{norm.length} MCQs</span>
+                              <div className="text-[11px] font-bold text-slate-600 shrink-0 flex items-center gap-1.5">
+                                  <span className="text-slate-800 font-black">{totalAnswered} / {norm.length}</span>
+                                  {listMode === 'mcq' && listStarted && (
+                                      <span className={`font-mono text-[10px] px-1.5 py-0.5 rounded-full ${listSubmitted ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                                          ⏱ {Math.floor(listTimerSeconds / 60).toString().padStart(2, '0')}:{(listTimerSeconds % 60).toString().padStart(2, '0')}
+                                      </span>
+                                  )}
                               </div>
                               <div className="flex-1 flex bg-slate-100 p-0.5 rounded-full ml-2">
                                   <button
@@ -1128,12 +1243,45 @@ export const McqView: React.FC<Props> = ({
                           </div>
                       )}
 
-                      {/* MCQ mode hint when not all answered */}
-                      {listMode === 'mcq' && !allAnswered && (
-                          <div className="px-4 pt-3">
-                              <div className="bg-blue-50 border border-blue-200 rounded-2xl px-3 py-2 text-[11px] font-bold text-blue-700 text-center">
-                                  👆 Pick an answer for every question. Once you finish, the speaker will read out the answers too.
-                              </div>
+                      {/* MCQ mode hints and notifications */}
+                      {listMode === 'mcq' && !listSubmitted && (
+                          <div className="px-4 pt-3 space-y-2">
+                              {/* 30-MCQ notification: gentle nudge to submit */}
+                              {show30McqNudge && (
+                                  <div className="bg-amber-50 border border-amber-300 rounded-2xl px-3 py-2.5 text-[11px] font-bold text-amber-800 flex items-center justify-between gap-2">
+                                      <span>🎯 30 questions done! Baaki karo ya abhi submit karo.</span>
+                                      <button
+                                          onClick={handleSubmit}
+                                          className="shrink-0 bg-amber-500 text-white text-[10px] font-black px-2.5 py-1 rounded-lg active:scale-95"
+                                      >Submit</button>
+                                  </div>
+                              )}
+                              {/* Standard hint */}
+                              {!allAnswered && (
+                                  <div className="bg-blue-50 border border-blue-200 rounded-2xl px-3 py-2 text-[11px] font-bold text-blue-700 text-center">
+                                      👆 Har question ka jawab do, phir Submit karo. Galat answers automatically Mistakes mein jayenge.
+                                  </div>
+                              )}
+                              {/* All answered but not submitted */}
+                              {allAnswered && (
+                                  <button
+                                      onClick={handleSubmit}
+                                      className="w-full py-3 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-black text-sm shadow-md flex items-center justify-center gap-2 active:scale-95"
+                                  >
+                                      ✅ Submit — Results Dekho
+                                  </button>
+                              )}
+                          </div>
+                      )}
+                      {/* MCQ mode: partial answers submit button (shows after ≥1 answer) */}
+                      {listMode === 'mcq' && !listSubmitted && totalAnswered >= 1 && !allAnswered && (
+                          <div className="px-4 pt-2">
+                              <button
+                                  onClick={handleSubmit}
+                                  className="w-full py-2.5 rounded-2xl bg-indigo-600 text-white font-black text-xs shadow-md flex items-center justify-center gap-2 active:scale-95"
+                              >
+                                  📋 Submit ({totalAnswered}/{norm.length} answered)
+                              </button>
                           </div>
                       )}
 
@@ -1144,7 +1292,8 @@ export const McqView: React.FC<Props> = ({
                               const revealed = !!listRevealed[qi];
                               const isMcq = listMode === 'mcq';
                               const answeredHere = isMcq ? selected !== undefined : revealed;
-                              const showAnswerColors = answeredHere;
+                              // MCQ exam-mode: only show correct/wrong colors AFTER submit
+                              const showAnswerColors = isMcq ? listSubmitted : answeredHere;
                               const isSaved = !!savedQuestions[qi];
 
                               return (
@@ -1178,6 +1327,22 @@ export const McqView: React.FC<Props> = ({
                                               >
                                                   <span className="text-lg leading-none font-black">{isSaved ? '✓' : '+'}</span>
                                               </button>
+                                              {/* Community share button */}
+                                              {onShareToCommunity && (
+                                                  <button
+                                                      type="button"
+                                                      onClick={() => {
+                                                          const opts = q.options.length === 4
+                                                              ? q.options as [string,string,string,string]
+                                                              : ([...q.options, '', '', '', ''].slice(0, 4) as [string,string,string,string]);
+                                                          onShareToCommunity({ question: q.question, options: opts, correctAnswer: q.correctAnswer, explanation: q.explanation || '' });
+                                                      }}
+                                                      title="Community MCQ tab mein share karo"
+                                                      className="shrink-0 w-9 h-9 rounded-full flex items-center justify-center transition-colors active:scale-95 bg-violet-50 text-violet-600 hover:bg-violet-100"
+                                                  >
+                                                      <Send size={14} />
+                                                  </button>
+                                              )}
                                           </div>
                                       </div>
 
@@ -1194,6 +1359,9 @@ export const McqView: React.FC<Props> = ({
                                                   if (isCorrect) cls += ' bg-emerald-50 border-emerald-300 text-emerald-800';
                                                   else if (isSelected) cls += ' bg-rose-50 border-rose-300 text-rose-800';
                                                   else cls += ' bg-slate-50 border-slate-200 text-slate-500 opacity-70';
+                                              } else if (isMcq && isSelected) {
+                                                  // Selected but not yet submitted — neutral blue highlight
+                                                  cls += ' bg-indigo-50 border-indigo-400 text-indigo-900';
                                               } else {
                                                   cls += ' bg-white border-slate-200 text-slate-700' + (isMcq ? ' hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer' : '');
                                               }
@@ -1203,13 +1371,15 @@ export const McqView: React.FC<Props> = ({
                                                       key={oi}
                                                       onClick={() => {
                                                           if (!isMcq) return;
-                                                          if (selected !== undefined) return;
+                                                          if (selected !== undefined || listSubmitted) return;
+                                                          // Exam mode: just record selection, NO immediate mistake tracking
                                                           setListAnswers(prev => ({ ...prev, [qi]: oi }));
+                                                          if (!listStarted) setListStarted(true);
                                                       }}
-                                                      disabled={!isMcq || selected !== undefined}
+                                                      disabled={!isMcq || selected !== undefined || listSubmitted}
                                                       className={cls}
                                                   >
-                                                      <span className={`flex-shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-black ${showAnswerColors && isCorrect ? 'bg-emerald-500 text-white border-emerald-500' : showAnswerColors && isSelected ? 'bg-rose-500 text-white border-rose-500' : 'border-slate-300 text-slate-500'}`}>
+                                                      <span className={`flex-shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-black ${showAnswerColors && isCorrect ? 'bg-emerald-500 text-white border-emerald-500' : showAnswerColors && isSelected ? 'bg-rose-500 text-white border-rose-500' : isMcq && isSelected ? 'bg-indigo-500 text-white border-indigo-500' : 'border-slate-300 text-slate-500'}`}>
                                                           {String.fromCharCode(65 + oi)}
                                                       </span>
                                                       <span className="flex-1">{opt}</span>
@@ -1255,19 +1425,31 @@ export const McqView: React.FC<Props> = ({
                               );
                           })}
 
-                          {/* Score Summary (MCQ mode, all answered) */}
-                          {listMode === 'mcq' && allAnswered && (
+                          {/* Score Summary — only shows AFTER submit (exam mode) */}
+                          {listMode === 'mcq' && listSubmitted && (
                               <div className="bg-gradient-to-br from-indigo-500 to-purple-600 text-white rounded-2xl p-5 shadow-lg">
                                   <p className="text-[10px] font-black uppercase tracking-wider opacity-90 mb-1">Final Score</p>
-                                  <p className="text-3xl font-black mb-3">{Math.round((correctCount / norm.length) * 100)}%</p>
-                                  <div className="grid grid-cols-3 gap-2 text-center text-xs font-bold">
+                                  <p className="text-3xl font-black mb-1">{Math.round((correctCount / Math.max(totalAnswered, 1)) * 100)}%</p>
+                                  <p className="text-[10px] opacity-75 mb-3">⏱ Time: {Math.floor(listTimerSeconds / 60).toString().padStart(2,'0')}:{(listTimerSeconds % 60).toString().padStart(2,'0')}</p>
+                                  <div className="grid grid-cols-3 gap-2 text-center text-xs font-bold mb-4">
                                       <div className="bg-white/15 rounded-xl py-2"><div className="text-[10px] opacity-80">Attempted</div><div className="text-base">{totalAnswered}</div></div>
-                                      <div className="bg-white/15 rounded-xl py-2"><div className="text-[10px] opacity-80">Correct</div><div className="text-base">{correctCount}</div></div>
-                                      <div className="bg-white/15 rounded-xl py-2"><div className="text-[10px] opacity-80">Wrong</div><div className="text-base">{wrongCount}</div></div>
+                                      <div className="bg-white/15 rounded-xl py-2"><div className="text-[10px] opacity-80">✅ Correct</div><div className="text-base">{correctCount}</div></div>
+                                      <div className="bg-white/15 rounded-xl py-2"><div className="text-[10px] opacity-80">❌ Wrong</div><div className="text-base">{wrongCount}</div></div>
                                   </div>
+                                  {wrongCount > 0 && (
+                                      <div className="bg-white/20 rounded-xl px-3 py-2 text-[11px] font-bold mb-3 text-center">
+                                          📌 {wrongCount} galat questions Mistakes page mein save ho gaye
+                                      </div>
+                                  )}
                                   <button
-                                      onClick={() => { setListAnswers({}); }}
-                                      className="mt-4 w-full py-2.5 rounded-xl bg-white text-indigo-700 font-black text-xs flex items-center justify-center gap-2 active:scale-95"
+                                      onClick={() => {
+                                          setListAnswers({});
+                                          setListRevealed({});
+                                          setListSubmitted(false);
+                                          setListTimerSeconds(0);
+                                          setListStarted(false);
+                                      }}
+                                      className="w-full py-2.5 rounded-xl bg-white text-indigo-700 font-black text-xs flex items-center justify-center gap-2 active:scale-95"
                                   >
                                       <RefreshCw size={14}/> Phir se Try Karo
                                   </button>
@@ -1300,7 +1482,7 @@ export const McqView: React.FC<Props> = ({
        ) : (
         <div className="bg-white min-h-screen pb-20 animate-in fade-in slide-in-from-right-8">
            {/* HEADER */}
-           <div className="sticky top-0 z-20 bg-white border-b border-slate-100 shadow-sm p-4 flex items-center gap-3">
+           <div className={`sticky top-0 z-20 bg-white border-b border-slate-100 shadow-sm p-4 flex items-center gap-3 transition-all duration-200 ${hideHeader ? 'hidden' : ''}`}>
            <button onClick={onBack} className="p-2 hover:bg-slate-100 rounded-full text-slate-600">
                <ArrowLeft size={20} />
            </button>

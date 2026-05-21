@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User, TopicItem } from '../types';
-import { X, Play, BookOpen, Loader2, Pause, ChevronLeft, CheckCircle } from 'lucide-react';
+import { X, Play, BookOpen, Loader2, Pause, ChevronLeft, CheckCircle, Volume2, FileText } from 'lucide-react';
 import { getChapterData } from '../firebase';
 import { storage } from '../utils/storage';
 import { SpeakButton } from './SpeakButton';
 import { DEFAULT_SUBJECTS } from '../constants';
 import { formatMcqNotes, findRelevantNote } from '../utils/noteFormatter';
+import { ChunkedNotesReader } from './ChunkedNotesReader';
 
 interface Props {
     user: User;
@@ -35,6 +36,7 @@ export const WeakAverageNotesView: React.FC<Props> = ({ user, topics, onClose, o
     // TTS State
     const [currentPlayingIndex, setCurrentPlayingIndex] = useState<number | null>(null);
     const [isPlayingAll, setIsPlayingAll] = useState(false);
+    const [chunkTopics, setChunkTopics] = useState<Set<string>>(new Set());
 
     // Refs for scrolling and reading
     const topicRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -300,6 +302,17 @@ export const WeakAverageNotesView: React.FC<Props> = ({ user, topics, onClose, o
                                         </div>
                                         <div className="flex gap-2 items-center">
                                             <button
+                                                onClick={() => setChunkTopics(prev => {
+                                                    const next = new Set(prev);
+                                                    if (next.has(topic.id)) next.delete(topic.id); else next.add(topic.id);
+                                                    return next;
+                                                })}
+                                                className={`p-2 rounded-full transition-all flex items-center gap-1 shrink-0 ${chunkTopics.has(topic.id) ? 'bg-amber-100 text-amber-700 ring-2 ring-amber-400' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                                                title={chunkTopics.has(topic.id) ? 'Styled Notes mein switch karo' : 'TTS Reader mein switch karo'}
+                                            >
+                                                {chunkTopics.has(topic.id) ? <FileText size={18} /> : <Volume2 size={18} />}
+                                            </button>
+                                            <button
                                                 onClick={() => toggleTopicComplete(topic.id)}
                                                 className={`p-2 rounded-full transition-all flex items-center gap-1 shrink-0 ${completedTopicIds.has(topic.id) ? 'bg-green-100 text-green-700 ring-2 ring-green-500' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
                                                 title={completedTopicIds.has(topic.id) ? "Marked as Completed" : "Mark as Complete"}
@@ -326,11 +339,26 @@ export const WeakAverageNotesView: React.FC<Props> = ({ user, topics, onClose, o
                                         </div>
                                     </div>
 
-                                    {/* CONTENT CONTAINER FOR TTS */}
-                                    <div
-                                        className="prose prose-sm prose-slate max-w-none text-justify"
-                                        dangerouslySetInnerHTML={{ __html: topic.content }}
-                                    />
+                                    {/* CONTENT CONTAINER — styled HTML or ChunkedNotesReader */}
+                                    {chunkTopics.has(topic.id) ? (
+                                        <ChunkedNotesReader
+                                            key={`wan-chunk-${topic.id}`}
+                                            content={topic.plainText || topic.content
+                                                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                                                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                                                .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+                                                .replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ')
+                                                .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()}
+                                            topBarLabel={topic.name}
+                                            hideTopBar={false}
+                                            preferChunkMode
+                                        />
+                                    ) : (
+                                        <div
+                                            className="prose prose-sm prose-slate max-w-none text-justify"
+                                            dangerouslySetInnerHTML={{ __html: topic.content }}
+                                        />
+                                    )}
                                 </div>
                             );
                         })}

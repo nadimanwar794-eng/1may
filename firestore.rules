@@ -118,6 +118,42 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    match /chat/{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /demand_requests/{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /user_themes/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+    }
+
+    match /user_animations/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+    }
+
+    match /published_themes/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    match /published_animations/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // ---------------------------------------------------------
+    // COMPRE BOOK NOTES (per-book Firestore docs, auto-chunked)
+    // ---------------------------------------------------------
+    match /compre_notes/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
     // ---------------------------------------------------------
     // DEFAULT DENY
     // ---------------------------------------------------------

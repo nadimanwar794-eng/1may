@@ -4,18 +4,6 @@ export const recalculateSubscriptionStatus = (user: User, settings?: SystemSetti
     const now = new Date();
     let updatedUser = { ...user };
 
-    // EMERGENCY GUARD: Protect LIFETIME/YEARLY Status
-    // If user was previously Lifetime/Yearly, DO NOT downgrade to FREE just because activeSubscriptions is empty/buggy.
-    if ((updatedUser.subscriptionTier === 'LIFETIME' || updatedUser.subscriptionTier === 'YEARLY') && !updatedUser.isPremium) {
-        // Auto-fix state
-        updatedUser.isPremium = true;
-        if (!updatedUser.subscriptionEndDate) {
-             updatedUser.subscriptionEndDate = updatedUser.subscriptionTier === 'LIFETIME'
-                ? new Date(now.getTime() + 100 * 365 * 24 * 60 * 60 * 1000).toISOString()
-                : new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString();
-        }
-    }
-
     // 0. Check Free Access Override (Admin Config)
     if (settings?.freeAccessConfig) {
         const { validUntil, classes } = settings.freeAccessConfig;
@@ -52,15 +40,18 @@ export const recalculateSubscriptionStatus = (user: User, settings?: SystemSetti
         }
     }
 
-    // If still no active subs or empty array
-    if (!updatedUser.activeSubscriptions || updatedUser.activeSubscriptions.length === 0) {
-        // Check if we should reset legacy fields (only if they are expired or inconsistent)
-        // If we migrated above, we have activeSubs. If we didn't migrate (because expired or missing), then yes, reset.
+    const resetToFree = () => {
         updatedUser.isPremium = false;
         updatedUser.subscriptionTier = 'FREE';
         updatedUser.subscriptionLevel = undefined;
         updatedUser.subscriptionEndDate = undefined;
+        updatedUser.activeSubscriptions = [];
         return updatedUser;
+    };
+
+    // If still no active subs or empty array
+    if (!updatedUser.activeSubscriptions || updatedUser.activeSubscriptions.length === 0) {
+        return resetToFree();
     }
 
     // 2. Filter Active Subscriptions (We only consider those not expired for the status)
@@ -70,11 +61,7 @@ export const recalculateSubscriptionStatus = (user: User, settings?: SystemSetti
     });
 
     if (activeSubs.length === 0) {
-        updatedUser.isPremium = false;
-        updatedUser.subscriptionTier = 'FREE';
-        updatedUser.subscriptionLevel = undefined;
-        updatedUser.subscriptionEndDate = undefined;
-        return updatedUser;
+        return resetToFree();
     }
 
     // 3. Find Best Subscription

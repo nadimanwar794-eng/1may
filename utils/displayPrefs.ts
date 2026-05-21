@@ -93,6 +93,15 @@ const requestFullscreenSafe = async (): Promise<boolean> => {
 };
 
 /**
+ * Global flag — true while `rotateScreen()` is in progress.
+ * Fullscreen-change handlers in any component can check this so they
+ * don't hide the floating buttons / bottom-nav when rotation is the
+ * cause of the fullscreen entry.
+ */
+let _rotatingForOrientation = false;
+export const isRotatingForOrientation = (): boolean => _rotatingForOrientation;
+
+/**
  * Rotate the screen between portrait and landscape. Returns the new
  * orientation on success, or `null` if the device/browser doesn't
  * support programmatic orientation locking (most desktop browsers and
@@ -108,8 +117,9 @@ export const rotateScreen = async (): Promise<'portrait' | 'landscape' | null> =
 
     // Need fullscreen for the lock to be honoured on most browsers.
     if (!isFullscreen()) {
+      _rotatingForOrientation = true;
       const ok = await requestFullscreenSafe();
-      if (!ok) return null;
+      if (!ok) { _rotatingForOrientation = false; return null; }
     }
 
     // Decide the target — flip from current orientation type.
@@ -125,11 +135,14 @@ export const rotateScreen = async (): Promise<'portrait' | 'landscape' | null> =
     for (const target of candidates) {
       try {
         await so.lock(target);
+        _rotatingForOrientation = false;
         return goingTo;
       } catch { /* try next candidate */ }
     }
+    _rotatingForOrientation = false;
     return null;
   } catch {
+    _rotatingForOrientation = false;
     return null;
   }
 };

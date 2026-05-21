@@ -1,41 +1,73 @@
 import { initializeApp } from "firebase/app";
 import { getAnalytics } from "firebase/analytics";
-import { getFirestore, doc, setDoc, getDoc, collection, updateDoc, deleteDoc, onSnapshot, getDocs, query, where, limitToLast, orderBy, increment, enableMultiTabIndexedDbPersistence } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, getDoc, collection, updateDoc, deleteDoc, onSnapshot, getDocs, query, where, limitToLast, orderBy, increment } from "firebase/firestore";
 import { getDatabase, ref, set, get, onValue, update, remove, query as rtdbQuery, limitToLast as rtdbLimitToLast, orderByChild as rtdbOrderByChild } from "firebase/database";
 import { getAuth, onAuthStateChanged } from "firebase/auth";
 import { storage } from "./utils/storage";
 
 // --- FIREBASE CONFIGURATION ---
 const firebaseConfig = {
-  apiKey: "AIzaSyBaf1iGBIHgtma9SCt1Q4SduRAQP5DBnlE",
-  authDomain: "iic-adf79.firebaseapp.com",
-  databaseURL: "https://iic-adf79-default-rtdb.firebaseio.com",
-  projectId: "iic-adf79",
-  storageBucket: "iic-adf79.firebasestorage.app",
-  messagingSenderId: "970486594646",
-  appId: "1:970486594646:web:e1eccee34b14b38923cff7",
-  measurementId: "G-VWPT3BYEZK"
+  apiKey: "AIzaSyDyYNuSJr72nC52MinT0rt6jbDae8HLCts",
+  authDomain: "project-1959318394445181665.firebaseapp.com",
+  databaseURL: "https://project-1959318394445181665-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "project-1959318394445181665",
+  storageBucket: "project-1959318394445181665.firebasestorage.app",
+  messagingSenderId: "130030264192",
+  appId: "1:130030264192:web:1b8a53d694b15c8ef1eb65"
 };
+
+// ── Stale IndexedDB guard ──────────────────────────────────────────────────
+// When the Firebase project changes the old Firestore IndexedDB cache causes
+// "INTERNAL ASSERTION FAILED" crashes. Detect the switch, delete every
+// firestore/firebase IndexedDB database, then continue normally.
+const _FSP_KEY = 'nst_firebase_project_id';
+const _lastProject = (() => { try { return localStorage.getItem(_FSP_KEY); } catch { return null; } })();
+if (_lastProject && _lastProject !== firebaseConfig.projectId) {
+  // Project switched — nuke stale caches synchronously before init
+  try {
+    (indexedDB as any).databases?.().then((dbs: { name?: string }[]) => {
+      dbs.filter(d => d.name && (d.name.includes('firestore') || d.name.includes('firebase')))
+        .forEach(d => { try { indexedDB.deleteDatabase(d.name!); } catch {} });
+    }).catch(() => {});
+  } catch {}
+}
+try { localStorage.setItem(_FSP_KEY, firebaseConfig.projectId); } catch {}
+
+// ── Global Firestore assertion-error auto-recovery ─────────────────────────
+// If the assertion error slips through (e.g. mid-session project switch),
+// delete all Firebase IndexedDB databases and hard-reload automatically.
+if (typeof window !== 'undefined') {
+  window.addEventListener('unhandledrejection', (event) => {
+    const msg = String(event?.reason?.message || event?.reason || '');
+    if (msg.includes('FIRESTORE') && msg.includes('INTERNAL ASSERTION FAILED')) {
+      event.preventDefault();
+      console.warn('[IIC] Firestore assertion error — clearing IndexedDB cache and reloading…');
+      const doReload = () => { try { localStorage.removeItem(_FSP_KEY); } catch {} window.location.reload(); };
+      try {
+        (indexedDB as any).databases?.().then((dbs: { name?: string }[]) => {
+          const dels = dbs
+            .filter(d => d.name && (d.name.includes('firestore') || d.name.includes('firebase')))
+            .map(d => new Promise<void>(res => {
+              const r = indexedDB.deleteDatabase(d.name!);
+              r.onsuccess = () => res();
+              r.onerror = () => res();
+            }));
+          Promise.all(dels).then(doReload).catch(doReload);
+        }).catch(doReload);
+      } catch { doReload(); }
+    }
+  });
+}
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const analytics = getAnalytics(app);
-const db = getFirestore(app);
+// Use new persistentLocalCache API (replaces deprecated enableMultiTabIndexedDbPersistence)
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+});
 const rtdb = getDatabase(app);
 const auth = getAuth(app);
-
-// Enable Offline Persistence for Firestore
-try {
-  enableMultiTabIndexedDbPersistence(db).catch((err) => {
-      if (err.code === 'failed-precondition') {
-          console.warn("Multiple tabs open, persistence can only be enabled in one tab at a a time.");
-      } else if (err.code === 'unimplemented') {
-          console.warn("The current browser does not support all of the features required to enable persistence.");
-      }
-  });
-} catch (e) {
-  console.error("Persistence Initialization Error", e);
-}
 
 // --- EXPORTED HELPERS ---
 
@@ -216,6 +248,9 @@ export const subscribeToUser = (userId: string, callback: (user: any) => void) =
     const unsubFirestore = onSnapshot(doc(db, "users", userId), (docSnap) => {
         if (docSnap.exists()) {
             callback(docSnap.data());
+        } else {
+            // Document was deleted by admin — signal null so App.tsx can force logout
+            callback(null);
         }
     });
 
@@ -324,14 +359,56 @@ export const getSystemSettings = async () => {
 
 export const saveSystemSettings = async (settings: any) => {
   try {
-    const sanitizedSettings = sanitizeForFirestore(settings);
-    // Use Promise.allSettled to ensure partial success if one DB is restricted (Permission Denied)
-    const results = await Promise.allSettled([
-        set(ref(rtdb, 'system_settings'), sanitizedSettings),
-        setDoc(doc(db, "config", "system_settings"), sanitizedSettings)
-    ]);
+    // Separate lucentNotes from core settings completely.
+    // Each LucentNoteEntry is stored as its own document in lucent_entries/{id}
+    // so a single Firestore document never hits the 1MB limit — even with 2000+ pages.
+    const { lucentNotes, ...coreSettings } = settings;
+    const sanitizedCore = sanitizeForFirestore(coreSettings);
 
-    // Check if at least one succeeded
+    const writes: Promise<any>[] = [
+      set(ref(rtdb, 'system_settings'), sanitizedCore),
+      setDoc(doc(db, "config", "system_settings"), sanitizedCore),
+    ];
+
+    // Process lucentNotes only when explicitly provided (non-null).
+    // An empty array [] is valid here — it means "delete all remaining entries"
+    // (e.g. admin deleted the last Lucent note). This is different from lucentNotes
+    // being absent/undefined which signals a race-condition / unrelated save.
+    if (lucentNotes != null && Array.isArray(lucentNotes)) {
+      const entries: any[] = lucentNotes;
+      const sanitizedEntries: any[] = sanitizeForFirestore(entries);
+      const newIds: string[] = sanitizedEntries.map((e: any) => e?.id).filter(Boolean);
+
+      // 1. Upsert each remaining entry as its own document (skip if empty)
+      sanitizedEntries.forEach((entry: any) => {
+        if (!entry?.id) return;
+        writes.push(setDoc(doc(db, "lucent_entries", entry.id), entry));
+        writes.push(set(ref(rtdb, `lucent_entries/${entry.id}`), entry));
+      });
+
+      // 2. Save ordered index so subscriber can reconstruct the array in order
+      const indexPayload = { ids: newIds };
+      writes.push(setDoc(doc(db, "config", "lucent_index"), indexPayload));
+      writes.push(set(ref(rtdb, 'lucent_index'), indexPayload));
+
+      // 3. Delete documents that were removed — read old index first
+      try {
+        const oldIndexSnap = await getDoc(doc(db, "config", "lucent_index"));
+        if (oldIndexSnap.exists()) {
+          const oldIds: string[] = oldIndexSnap.data()?.ids ?? [];
+          const newIdSet = new Set(newIds);
+          const toDelete = oldIds.filter((id: string) => !newIdSet.has(id));
+          toDelete.forEach((id: string) => {
+            writes.push(deleteDoc(doc(db, "lucent_entries", id)));
+            writes.push(remove(ref(rtdb, `lucent_entries/${id}`)));
+          });
+        }
+      } catch (e) {
+        console.warn("lucent_index read failed — skipping deletion cleanup:", e);
+      }
+    }
+
+    const results = await Promise.allSettled(writes);
     const anySuccess = results.some(r => r.status === 'fulfilled');
     const errors = results.filter(r => r.status === 'rejected').map((r: any) => r.reason);
 
@@ -347,25 +424,75 @@ export const saveSystemSettings = async (settings: any) => {
 };
 
 export const subscribeToSettings = (callback: (settings: any) => void) => {
-  // Listen to both Firestore and RTDB concurrently to ensure high availability and realtime updates
-  // RTDB is typically faster for live pushes
+  // Core settings and lucent entries come from separate paths and are merged before emit.
+  let latestCore: any = null;
+  let latestLucentMap: Record<string, any> = {};  // id → entry
+  let latestOrder: string[] = [];                  // ordered list of ids
+  // Guard: don't emit lucentNotes until at least one Firestore snapshot has confirmed
+  // the collection state. This prevents emitting [] while entries are still loading,
+  // which could cause a subsequent save to wipe all Lucent data (race condition bug).
+  let lucentEntriesConfirmed = false;
 
-  const unsubFirestore = onSnapshot(doc(db, "config", "system_settings"), (docSnap) => {
-      if (docSnap.exists()) {
-          callback(docSnap.data());
-      }
+  const emit = () => {
+    if (latestCore == null) return;
+    // Only include lucentNotes once we have a confirmed snapshot from Firestore
+    if (!lucentEntriesConfirmed) {
+      callback({ ...latestCore });
+      return;
+    }
+    // Rebuild ordered array using ONLY the index — do NOT append orphan entries.
+    // Orphan entries are deleted notes that RTDB may still hold temporarily;
+    // appending them would cause deleted notes to reappear in the UI.
+    const ordered = latestOrder.map(id => latestLucentMap[id]).filter(Boolean);
+    callback({ ...latestCore, lucentNotes: ordered });
+  };
+
+  // --- Core system settings ---
+  const unsubFs = onSnapshot(doc(db, "config", "system_settings"), (snap) => {
+    if (snap.exists()) { latestCore = snap.data(); emit(); }
+  });
+  const unsubRtdb = onValue(ref(rtdb, 'system_settings'), (snap) => {
+    const d = snap.val(); if (d) { latestCore = d; emit(); }
   });
 
-  const unsubRTDB = onValue(ref(rtdb, 'system_settings'), (snap) => {
-      const data = snap.val();
-      if (data) {
-          callback(data);
+  // --- Lucent entries (Firestore collection — each entry is its own document) ---
+  const unsubEntries = onSnapshot(collection(db, "lucent_entries"), (snapshot) => {
+    latestLucentMap = {};
+    snapshot.forEach(d => { latestLucentMap[d.id] = d.data(); });
+    lucentEntriesConfirmed = true; // Firestore has responded — safe to include in emit
+    emit();
+  });
+
+  // --- RTDB backup for lucent entries (covers Firestore offline edge cases) ---
+  const unsubEntriesRtdb = onValue(ref(rtdb, 'lucent_entries'), (snap) => {
+    const data = snap.val();
+    if (data && typeof data === 'object') {
+      if (!lucentEntriesConfirmed) {
+        // Before Firestore confirms, use RTDB as initial data source
+        Object.entries(data).forEach(([id, entry]: [string, any]) => {
+          if (!latestLucentMap[id]) latestLucentMap[id] = entry;
+        });
+        lucentEntriesConfirmed = true;
+        emit();
       }
+      // After Firestore has confirmed, RTDB is NOT used to add entries —
+      // doing so would bring back recently deleted notes that RTDB still holds in cache.
+      // Firestore is the source of truth for lucent_entries after confirmation.
+    }
+  });
+
+  // --- Lucent index (ordering + deletion awareness) ---
+  const unsubIndex = onSnapshot(doc(db, "config", "lucent_index"), (snap) => {
+    if (snap.exists()) { latestOrder = snap.data()?.ids ?? []; emit(); }
+  });
+  const unsubIndexRtdb = onValue(ref(rtdb, 'lucent_index'), (snap) => {
+    const d = snap.val(); if (d?.ids) { latestOrder = d.ids; emit(); }
   });
 
   return () => {
-      unsubFirestore();
-      unsubRTDB();
+    unsubFs(); unsubRtdb();
+    unsubEntries(); unsubEntriesRtdb();
+    unsubIndex(); unsubIndexRtdb();
   };
 };
 
@@ -411,12 +538,38 @@ export const saveChapterData = async (key: string, data: any) => {
     try { _memCachePut(key, sanitizedData); } catch {}
 
     // 3. Cloud Sync (Wait for at least one success to confirm)
-    // We use Promise.allSettled to ensure we try both but don't fail if one fails
-    // However, if we are online, we want to know if it failed.
-
-    const promises = [];
+    const promises: Promise<any>[] = [];
     promises.push(set(ref(rtdb, `content_data/${key}`), sanitizedData));
     promises.push(setDoc(doc(db, "content_data", key), sanitizedData));
+
+    // 4. Update content_index for real-time stats on home screen
+    if (key.startsWith('nst_content_')) {
+      try {
+        const withoutPrefix = key.slice('nst_content_'.length); // e.g. "CBSE_10_Physics_ch1"
+        const parts = withoutPrefix.split('_');
+        if (parts.length >= 3) {
+          const board = parts[0];       // CBSE or BSEB
+          const classLevel = parts[1];  // 6-12 or COMPETITION
+          const statsKey = `${board}_${classLevel}`;
+          const safeKey = key.replace(/[.#$[\]/]/g, '-');
+          // Subject is everything between classLevel and last part (chapterId)
+          const subjectName = parts.slice(2, parts.length - 1).join(' ');
+          const hasNotes = !!(sanitizedData.freeNotes || sanitizedData.topicNotes?.length || sanitizedData.premiumNotes || sanitizedData.content || sanitizedData.teachingStrategyNotes);
+          const hasPdf   = !!(sanitizedData.pdfUrl || sanitizedData.pdfList?.length);
+          const hasVideo = !!(sanitizedData.videoPlaylist?.length || sanitizedData.topicVideos?.length);
+          const hasAudio = !!(sanitizedData.audioPlaylist?.length);
+          const hasMcq   = !!(sanitizedData.manualMcqData?.length || sanitizedData.weeklyTestMcqData?.length || sanitizedData.mcqList?.length);
+          promises.push(
+            set(ref(rtdb, `content_index/${statsKey}/${safeKey}`), {
+              notes: hasNotes, pdf: hasPdf, video: hasVideo, audio: hasAudio, mcq: hasMcq,
+              subject: subjectName,
+            })
+          );
+        }
+      } catch (_indexErr) {
+        // Non-fatal — index update failure should not block content save
+      }
+    }
 
     const results = await Promise.allSettled(promises);
     const anySuccess = results.some(r => r.status === 'fulfilled');
@@ -432,6 +585,30 @@ export const saveChapterData = async (key: string, data: any) => {
     console.error("Error saving chapter data:", error);
     throw error;
   }
+};
+
+// Subscribe to content_index stats for a board+class — returns an unsubscribe fn.
+export interface ContentTypeStats { notes: number; pdf: number; video: number; audio: number; mcq: number; }
+export type ContentIndexMap = Record<string, { notes: boolean; pdf: boolean; video: boolean; audio: boolean; mcq: boolean; subject?: string }>;
+export const subscribeToContentIndex = (
+  board: string,
+  classLevel: string,
+  callback: (stats: ContentTypeStats, rawIndex: ContentIndexMap) => void
+): (() => void) => {
+  const statsKey = `${board}_${classLevel}`;
+  const indexRef = ref(rtdb, `content_index/${statsKey}`);
+  return onValue(indexRef, (snap) => {
+    if (!snap.exists()) { callback({ notes: 0, pdf: 0, video: 0, audio: 0, mcq: 0 }, {}); return; }
+    const raw = snap.val() as ContentIndexMap;
+    const entries = Object.values(raw);
+    callback({
+      notes: entries.filter(e => e?.notes).length,
+      pdf:   entries.filter(e => e?.pdf).length,
+      video: entries.filter(e => e?.video).length,
+      audio: entries.filter(e => e?.audio).length,
+      mcq:   entries.filter(e => e?.mcq).length,
+    }, raw);
+  });
 };
 
 // ── In-memory LRU cache for chapter data ─────────────────────────────────────
@@ -748,6 +925,47 @@ export const subscribeToUniversalAnalysis = (callback: (logs: any[]) => void) =>
     });
 };
 
+// 8b. Compare Analytics — tracks which topics students compare most
+export const saveCompareAnalytic = async (query: string, hitCount: number) => {
+    if (!query?.trim()) return;
+    try {
+        const docId = `cmp_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+        const entry = {
+            id: docId,
+            query: query.trim().toLowerCase(),
+            displayQuery: query.trim(),
+            hitCount,
+            timestamp: new Date().toISOString(),
+            ts: Date.now(),
+        };
+        await set(ref(rtdb, `compare_analytics/${docId}`), entry);
+    } catch (e) { console.error("Error saving compare analytic:", e); }
+};
+
+export const subscribeToCompareAnalytics = (callback: (entries: any[]) => void) => {
+    const q = rtdbQuery(ref(rtdb, "compare_analytics"), rtdbLimitToLast(200));
+    return onValue(q, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+            callback(Object.values(data));
+        } else {
+            callback([]);
+        }
+    });
+};
+
+export const deleteCompareAnalyticsByQuery = async (queryKey: string) => {
+    try {
+        const snapshot = await get(ref(rtdb, 'compare_analytics'));
+        if (!snapshot.exists()) return;
+        const data = snapshot.val() as Record<string, any>;
+        const deleteOps = Object.entries(data)
+            .filter(([, entry]) => (entry.query || '').trim().toLowerCase() === queryKey)
+            .map(([key]) => remove(ref(rtdb, `compare_analytics/${key}`)));
+        await Promise.all(deleteOps);
+    } catch (e) { console.error('Error deleting compare analytics:', e); }
+};
+
 // 8. AI Interactions Log (New)
 export const saveAiInteraction = async (data: any) => {
     try {
@@ -850,7 +1068,6 @@ export const saveDemand = async (userId: string, details: string) => {
             status: 'PENDING'
         };
         const sanitized = sanitizeForFirestore(request);
-        // Save to RTDB for immediate Admin visibility
         await set(ref(rtdb, `demand_requests/${id}`), sanitized);
     } catch (e) { console.error("Error saving demand:", e); }
 };
@@ -858,13 +1075,20 @@ export const saveDemand = async (userId: string, details: string) => {
 export const saveDemandRequest = async (request: any) => {
     try {
         const sanitized = sanitizeForFirestore(request);
-        // Save to RTDB for immediate Admin visibility
         await set(ref(rtdb, `demand_requests/${request.id}`), sanitized);
+        await setDoc(doc(db, "demand_requests", request.id), sanitized);
     } catch (e) { console.error("Error saving demand:", e); }
 };
 
+export const updateDemandStatus = async (demandId: string, status: string) => {
+    try {
+        await update(ref(rtdb, `demand_requests/${demandId}`), { status });
+        await setDoc(doc(db, "demand_requests", demandId), { status }, { merge: true });
+    } catch (e) { console.error("Error updating demand status:", e); }
+};
+
 export const subscribeToDemands = (callback: (requests: any[]) => void) => {
-    const q = rtdbQuery(ref(rtdb, "demand_requests"), rtdbLimitToLast(100));
+    const q = rtdbQuery(ref(rtdb, "demand_requests"), rtdbLimitToLast(200));
     return onValue(q, (snapshot) => {
         const data = snapshot.val();
         if (data) {
@@ -875,6 +1099,333 @@ export const subscribeToDemands = (callback: (requests: any[]) => void) => {
             callback([]);
         }
     });
+};
+
+// 11. Support Chat (per-user private)
+export const sendSupportMessage = async (msg: any) => {
+    try {
+        const sanitized = sanitizeForFirestore(msg);
+        await set(ref(rtdb, `chat/dm/${msg.userId}/${msg.id}`), sanitized);
+    } catch (e) { console.error("Error sending support message:", e); }
+};
+
+export const subscribeSupportChat = (userId: string, callback: (msgs: any[]) => void) => {
+    const q = rtdbQuery(ref(rtdb, `chat/dm/${userId}`), rtdbLimitToLast(100));
+    return onValue(q, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+            const items = Object.entries(data).map(([k, v]: any) => ({ id: k, ...v }));
+            items.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+            callback(items);
+        } else {
+            callback([]);
+        }
+    });
+};
+
+// 12. Global Chat
+export const sendGlobalMessage = async (msg: any) => {
+    try {
+        const sanitized = sanitizeForFirestore(msg);
+        await set(ref(rtdb, `chat/universal/${msg.id}`), sanitized);
+    } catch (e) { console.error("Error sending global message:", e); }
+};
+
+export const subscribeGlobalChat = (callback: (msgs: any[]) => void) => {
+    const q = rtdbQuery(ref(rtdb, "chat/universal"), rtdbLimitToLast(100));
+    return onValue(q, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+            const items = Object.entries(data).map(([k, v]: any) => ({ id: k, ...v }));
+            items.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+            callback(items);
+        } else {
+            callback([]);
+        }
+    });
+};
+
+export const deleteGlobalMessage = async (msgId: string) => {
+    try {
+        await remove(ref(rtdb, `chat/universal/${msgId}`));
+    } catch (e) { console.error("Error deleting global message:", e); }
+};
+
+export const deleteSupportMessage = async (userId: string, msgId: string) => {
+    try {
+        await remove(ref(rtdb, `chat/dm/${userId}/${msgId}`));
+    } catch (e) { console.error("Error deleting support message:", e); }
+};
+
+// Admin: get all support threads (list of user IDs who have DMs)
+export const subscribeAllSupportThreads = (callback: (threads: any[]) => void) => {
+    return onValue(ref(rtdb, "chat/dm"), (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+            const threads = Object.entries(data).map(([userId, msgs]: any) => {
+                const msgList = Object.values(msgs || {}) as any[];
+                msgList.sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                const last = msgList[0];
+                return { userId, lastMessage: last, unreadCount: msgList.filter((m: any) => !m.readByAdmin).length };
+            });
+            threads.sort((a, b) => new Date((b.lastMessage?.timestamp) || 0).getTime() - new Date((a.lastMessage?.timestamp) || 0).getTime());
+            callback(threads);
+        } else {
+            callback([]);
+        }
+    });
+};
+
+// ── THEME & ANIMATION BUILDER ────────────────────────────────────────────────
+
+export const saveUserTheme = async (userId: string, theme: any) => {
+    try {
+        await setDoc(doc(db, 'user_themes', userId), sanitizeForFirestore({ ...theme, userId, updatedAt: new Date().toISOString() }), { merge: true });
+    } catch (e) { console.error('saveUserTheme error:', e); }
+};
+
+export const saveUserAnimation = async (userId: string, anim: any) => {
+    try {
+        await setDoc(doc(db, 'user_animations', userId), sanitizeForFirestore({ ...anim, userId, updatedAt: new Date().toISOString() }), { merge: true });
+    } catch (e) { console.error('saveUserAnimation error:', e); }
+};
+
+export const publishTheme = async (theme: any) => {
+    try {
+        await setDoc(doc(db, 'published_themes', theme.id), sanitizeForFirestore({ ...theme, publishedAt: new Date().toISOString() }), { merge: true });
+    } catch (e) { console.error('publishTheme error:', e); }
+};
+
+export const publishAnimation = async (anim: any) => {
+    try {
+        await setDoc(doc(db, 'published_animations', anim.id), sanitizeForFirestore({ ...anim, publishedAt: new Date().toISOString() }), { merge: true });
+    } catch (e) { console.error('publishAnimation error:', e); }
+};
+
+export const subscribePublishedThemes = (callback: (items: any[]) => void) => {
+    return onSnapshot(collection(db, 'published_themes'), (snap) => {
+        const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        items.sort((a: any, b: any) => (b.likes || 0) - (a.likes || 0));
+        callback(items);
+    });
+};
+
+export const subscribePublishedAnimations = (callback: (items: any[]) => void) => {
+    return onSnapshot(collection(db, 'published_animations'), (snap) => {
+        const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        items.sort((a: any, b: any) => (b.likes || 0) - (a.likes || 0));
+        callback(items);
+    });
+};
+
+export const likePublishedTheme = async (themeId: string, userId: string) => {
+    try {
+        const ref2 = doc(db, 'published_themes', themeId);
+        const snap = await getDoc(ref2);
+        if (!snap.exists()) return;
+        const data = snap.data();
+        const likedBy: string[] = data.likedBy || [];
+        if (likedBy.includes(userId)) return;
+        await updateDoc(ref2, { likes: (data.likes || 0) + 1, likedBy: [...likedBy, userId] });
+    } catch (e) { console.error('likePublishedTheme error:', e); }
+};
+
+export const likePublishedAnimation = async (animId: string, userId: string) => {
+    try {
+        const ref2 = doc(db, 'published_animations', animId);
+        const snap = await getDoc(ref2);
+        if (!snap.exists()) return;
+        const data = snap.data();
+        const likedBy: string[] = data.likedBy || [];
+        if (likedBy.includes(userId)) return;
+        await updateDoc(ref2, { likes: (data.likes || 0) + 1, likedBy: [...likedBy, userId] });
+    } catch (e) { console.error('likePublishedAnimation error:', e); }
+};
+
+// ─────────────────────────────────────────────────────────────────
+// COMPRE BOOK NOTES  (separate Firestore docs per book, auto-chunks
+// when a document approaches the 1 MB Firestore limit)
+// ─────────────────────────────────────────────────────────────────
+const COMPRE_NOTES_MAX_BYTES = 900 * 1024; // 900 KB safety margin
+
+export interface CompreNote {
+  id: string;
+  pageNumber: string;
+  notes: string;
+  chunkNotes?: string;
+  htmlNotes?: string;
+  topicName?: string;
+  groupId?: string;
+  subject?: string;
+  mcqs?: { question: string; options: string[]; answer: number }[];
+  videoUrl?: string;
+  audioUrl?: string;
+  createdAt: string;
+}
+
+interface CompreBookNotesDoc {
+  bookId: string;
+  bookName: string;
+  notes: CompreNote[];
+  chunkCount: number;
+  updatedAt: string;
+}
+
+function makeBookDocId(bookId: string, chunk: number): string {
+  return chunk <= 1 ? bookId : `${bookId}_${chunk}`;
+}
+
+export const getCompreBookNotes = async (bookId: string): Promise<CompreNote[]> => {
+  try {
+    const baseSnap = await getDoc(doc(db, 'compre_notes', bookId));
+    if (baseSnap.exists()) {
+      const base = baseSnap.data() as CompreBookNotesDoc;
+      const all: CompreNote[] = [...(base.notes || [])];
+      const chunks = base.chunkCount || 1;
+      for (let i = 2; i <= chunks; i++) {
+        const chSnap = await getDoc(doc(db, 'compre_notes', makeBookDocId(bookId, i)));
+        if (chSnap.exists()) all.push(...((chSnap.data() as CompreBookNotesDoc).notes || []));
+      }
+      return all.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    }
+  } catch (e) { console.warn('[getCompreBookNotes] Firestore failed, trying RTDB:', e); }
+  try {
+    const snap = await get(ref(rtdb, `compre_notes/${bookId}`));
+    if (snap.exists()) {
+      const data = snap.val();
+      return ((data.notes || []) as CompreNote[]).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    }
+  } catch (e) { console.error('[getCompreBookNotes] RTDB also failed:', e); }
+  return [];
+};
+
+export const addCompreBookNote = async (bookId: string, bookName: string, note: CompreNote): Promise<void> => {
+  const now = new Date().toISOString();
+  let firestoreOk = false;
+  try {
+    const baseRef = doc(db, 'compre_notes', bookId);
+    const baseSnap = await getDoc(baseRef);
+    let base: CompreBookNotesDoc = baseSnap.exists()
+      ? (baseSnap.data() as CompreBookNotesDoc)
+      : { bookId, bookName, notes: [], chunkCount: 1, updatedAt: '' };
+
+    const chunks = base.chunkCount || 1;
+    const lastChunkId = makeBookDocId(bookId, chunks);
+    const lastRef = chunks === 1 ? baseRef : doc(db, 'compre_notes', lastChunkId);
+    const lastSnap = chunks === 1 ? baseSnap : await getDoc(lastRef);
+    const lastData: CompreBookNotesDoc = (lastSnap.exists() ? lastSnap.data() : { bookId, bookName, notes: [], chunkCount: chunks, updatedAt: '' }) as CompreBookNotesDoc;
+
+    const testNotes = [...(lastData.notes || []), note];
+    const estimatedSize = new Blob([JSON.stringify({ ...lastData, notes: testNotes })]).size;
+
+    if (estimatedSize > COMPRE_NOTES_MAX_BYTES) {
+      const newChunk = chunks + 1;
+      const newRef = doc(db, 'compre_notes', makeBookDocId(bookId, newChunk));
+      await setDoc(newRef, sanitizeForFirestore({ bookId, bookName, notes: [note], chunkCount: newChunk, updatedAt: now }));
+      await setDoc(baseRef, sanitizeForFirestore({ ...base, chunkCount: newChunk, updatedAt: now }));
+    } else {
+      await setDoc(lastRef, sanitizeForFirestore({ ...lastData, notes: testNotes, updatedAt: now }));
+      if (chunks > 1) await setDoc(baseRef, sanitizeForFirestore({ ...base, updatedAt: now }), { merge: true });
+    }
+    firestoreOk = true;
+  } catch (e: any) {
+    console.warn('[addCompreBookNote] Firestore failed, trying RTDB fallback:', e?.message || e?.code || e);
+  }
+  try {
+    const snap = await get(ref(rtdb, `compre_notes/${bookId}`));
+    const existing = snap.exists() ? (snap.val() as { bookId: string; bookName: string; notes: CompreNote[]; updatedAt: string }) : { bookId, bookName, notes: [], updatedAt: '' };
+    const updatedNotes = [...(existing.notes || []).filter((n: CompreNote) => n.id !== note.id), note];
+    await set(ref(rtdb, `compre_notes/${bookId}`), { bookId, bookName, notes: updatedNotes, updatedAt: now });
+  } catch (rtdbErr: any) {
+    console.error('[addCompreBookNote] RTDB also failed:', rtdbErr?.message || rtdbErr?.code);
+    if (!firestoreOk) throw new Error(rtdbErr?.message || rtdbErr?.code || 'Save failed on all backends');
+  }
+};
+
+export const deleteCompreBookNote = async (bookId: string, noteId: string): Promise<void> => {
+  const now = new Date().toISOString();
+  let firestoreOk = false;
+  try {
+    const baseRef = doc(db, 'compre_notes', bookId);
+    const baseSnap = await getDoc(baseRef);
+    if (baseSnap.exists()) {
+      const base = baseSnap.data() as CompreBookNotesDoc;
+      const chunks = base.chunkCount || 1;
+      const baseNotes = base.notes || [];
+      if (baseNotes.some((n: CompreNote) => n.id === noteId)) {
+        await setDoc(baseRef, sanitizeForFirestore({ ...base, notes: baseNotes.filter((n: CompreNote) => n.id !== noteId), updatedAt: now }));
+        firestoreOk = true;
+      } else {
+        for (let i = 2; i <= chunks; i++) {
+          const cRef = doc(db, 'compre_notes', makeBookDocId(bookId, i));
+          const cSnap = await getDoc(cRef);
+          if (cSnap.exists()) {
+            const cData = cSnap.data() as CompreBookNotesDoc;
+            if ((cData.notes || []).some((n: CompreNote) => n.id === noteId)) {
+              await setDoc(cRef, sanitizeForFirestore({ ...cData, notes: (cData.notes || []).filter((n: CompreNote) => n.id !== noteId), updatedAt: now }));
+              firestoreOk = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+  } catch (e) { console.warn('[deleteCompreBookNote] Firestore failed, trying RTDB:', e); }
+  try {
+    const snap = await get(ref(rtdb, `compre_notes/${bookId}`));
+    if (snap.exists()) {
+      const data = snap.val();
+      const updatedNotes = (data.notes || []).filter((n: CompreNote) => n.id !== noteId);
+      await set(ref(rtdb, `compre_notes/${bookId}`), { ...data, notes: updatedNotes, updatedAt: now });
+    }
+  } catch (rtdbErr) {
+    console.error('[deleteCompreBookNote] RTDB also failed:', rtdbErr);
+    if (!firestoreOk) throw rtdbErr;
+  }
+};
+
+export const updateCompreBookNote = async (bookId: string, noteId: string, updatedNote: CompreNote): Promise<void> => {
+  const now = new Date().toISOString();
+  let firestoreOk = false;
+  try {
+    const baseRef = doc(db, 'compre_notes', bookId);
+    const baseSnap = await getDoc(baseRef);
+    if (baseSnap.exists()) {
+      const base = baseSnap.data() as CompreBookNotesDoc;
+      const chunks = base.chunkCount || 1;
+      const baseNotes = base.notes || [];
+      if (baseNotes.some((n: CompreNote) => n.id === noteId)) {
+        await setDoc(baseRef, sanitizeForFirestore({ ...base, notes: baseNotes.map((n: CompreNote) => n.id === noteId ? updatedNote : n), updatedAt: now }));
+        firestoreOk = true;
+      } else {
+        for (let i = 2; i <= chunks; i++) {
+          const cRef = doc(db, 'compre_notes', makeBookDocId(bookId, i));
+          const cSnap = await getDoc(cRef);
+          if (cSnap.exists()) {
+            const cData = cSnap.data() as CompreBookNotesDoc;
+            if ((cData.notes || []).some((n: CompreNote) => n.id === noteId)) {
+              await setDoc(cRef, sanitizeForFirestore({ ...cData, notes: (cData.notes || []).map((n: CompreNote) => n.id === noteId ? updatedNote : n), updatedAt: now }));
+              firestoreOk = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+  } catch (e) { console.warn('[updateCompreBookNote] Firestore failed, trying RTDB:', e); }
+  try {
+    const snap = await get(ref(rtdb, `compre_notes/${bookId}`));
+    if (snap.exists()) {
+      const data = snap.val();
+      const updatedNotes = (data.notes || []).map((n: CompreNote) => n.id === noteId ? updatedNote : n);
+      await set(ref(rtdb, `compre_notes/${bookId}`), { ...data, notes: updatedNotes, updatedAt: now });
+    } else if (!firestoreOk) {
+      throw new Error('Note not found in any backend');
+    }
+  } catch (rtdbErr: any) {
+    console.error('[updateCompreBookNote] RTDB also failed:', rtdbErr);
+    if (!firestoreOk) throw new Error(rtdbErr?.message || 'Update failed on all backends');
+  }
 };
 
 export { app, db, rtdb, auth };

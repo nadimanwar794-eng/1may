@@ -196,16 +196,39 @@ export const VideoPlaylistView: React.FC<Props> = ({
           return;
       }
 
-      // 4. Pay & Play (Check Auto-Pay)
-      if (user.credits < price) {
-          setAlertConfig({isOpen: true, message: `Insufficient Credits! You need ${price} coins to watch this video.`});
+      // 3. DAILY FREE QUOTA — subscribed users ki daily free video limit
+      const todayStr = new Date().toDateString();
+      if (isSubscribed) {
+          const freeLimit = user.subscriptionLevel === 'ULTRA'
+              ? (settings?.videoFreeLimitUltra ?? 10)
+              : (settings?.videoFreeLimitBasic ?? 5);
+          const dailyCount = (user.dailyVideoDate === todayStr) ? (user.dailyVideoCount ?? 0) : 0;
+          if (dailyCount < freeLimit) {
+              const updatedUser = { ...user, dailyVideoDate: todayStr, dailyVideoCount: dailyCount + 1 };
+              localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
+              saveUserToLive(updatedUser);
+              onUpdateUser(updatedUser);
+              triggerVideoPlay(video);
+              return;
+          }
+          // Over daily free limit — show remaining info
+          setAlertConfig({ isOpen: true, message: `Aaj ke ${freeLimit} free videos ho gaye! Ab har video ke liye ${price} coins lagenge.` });
+          // fall through to pay
+      }
+
+      // 4. Free user default price = 10 coins/video
+      const effectivePrice = !isSubscribed ? (settings?.defaultVideoCost ?? 10) : price;
+
+      // 5. Pay & Play (Check Auto-Pay)
+      if (user.credits < effectivePrice) {
+          setAlertConfig({isOpen: true, message: `Insufficient Credits! You need ${effectivePrice} coins to watch this video.`});
           return;
       }
 
       if (user.isAutoDeductEnabled) {
-          processPaymentAndPlay(video, price);
+          processPaymentAndPlay(video, effectivePrice);
       } else {
-          setPendingVideo({ index, price });
+          setPendingVideo({ index, price: effectivePrice });
       }
   };
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Gift, X } from 'lucide-react';
+import { Crown } from 'lucide-react';
 import { PendingReward } from '../types';
 
 interface Props {
@@ -9,52 +9,166 @@ interface Props {
 }
 
 export const RewardPopup: React.FC<Props> = ({ reward, onClaim, onIgnore }) => {
-    return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm animate-in zoom-in duration-300">
-            <div className="bg-white rounded-[32px] w-full text-center shadow-2xl relative overflow-hidden border-4 border-white/20">
-                
-                <div className="bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 p-8 pt-10 text-center text-white relative overflow-hidden">
-                    <button onClick={onIgnore} className="absolute top-4 right-4 bg-white/20 hover:bg-white/40 p-2 rounded-full transition-colors z-10 text-white">
-                        <X size={20} />
-                    </button>
-                    <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-20 animate-pulse"></div>
-                    <div className="relative z-10">
-                        <div className="w-20 h-20 bg-white rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-xl rotate-3 hover:rotate-6 transition-transform">
-                            <Gift size={40} className="text-pink-500 drop-shadow-sm animate-bounce" />
-                        </div>
-                        <h3 className="text-3xl font-black mb-1 tracking-tight drop-shadow-md">Reward Unlocked!</h3>
-                        <p className="text-white/90 font-medium text-sm drop-shadow-sm">{reward.label}</p>
-                    </div>
-                </div>
+    const isCoins = reward.type === 'COINS';
 
-                <div className="p-6 bg-white">
-                    <div className="bg-slate-50 border border-slate-100 rounded-2xl p-4 mb-6">
-                        <p className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Your Prize</p>
-                        {reward.type === 'COINS' ? (
-                            <div className="flex items-center justify-center gap-2">
-                                <span className="text-4xl font-black text-slate-800">{reward.amount}</span>
-                                <span className="text-lg font-bold text-yellow-500">Credits</span>
-                            </div>
+    return (
+        <div
+            className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
+            onClick={onIgnore}
+        >
+            <div
+                className="relative w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl"
+                style={{ background: 'linear-gradient(145deg, #0f0f23, #1a1040, #0f0f23)' }}
+                onClick={e => e.stopPropagation()}
+            >
+                {/* Shimmer sweep overlay */}
+                <div
+                    className="absolute inset-0 pointer-events-none"
+                    style={{
+                        background: 'linear-gradient(105deg, transparent 30%, rgba(251,191,36,0.13) 50%, transparent 70%)',
+                        backgroundSize: '200% 100%',
+                        animation: 'shimmer-sweep 2.8s linear infinite',
+                    }}
+                />
+
+                {/* Bottom glow bar */}
+                <div
+                    className="absolute bottom-0 left-0 right-0 h-[2px]"
+                    style={{
+                        background: 'linear-gradient(90deg, transparent, rgba(251,191,36,0.65), rgba(253,230,138,0.9), rgba(251,191,36,0.65), transparent)',
+                        animation: 'topbar-glow-pulse 2s ease-in-out infinite',
+                    }}
+                />
+
+                {/* Top glow bar */}
+                <div
+                    className="absolute top-0 left-0 right-0 h-[2px]"
+                    style={{
+                        background: 'linear-gradient(90deg, transparent, rgba(251,191,36,0.4), rgba(253,230,138,0.6), rgba(251,191,36,0.4), transparent)',
+                        animation: 'topbar-glow-pulse 2s ease-in-out infinite 1s',
+                    }}
+                />
+
+                {/* Sparkle dots */}
+                {[8, 25, 52, 75, 93].map((l, i) => (
+                    <div
+                        key={i}
+                        className="absolute w-1.5 h-1.5 rounded-full pointer-events-none"
+                        style={{
+                            top: `${6 + (i % 3) * 10}%`,
+                            left: `${l}%`,
+                            background: '#fbbf24',
+                            animation: `sparkle-blink ${1.4 + i * 0.35}s ease-in-out infinite ${i * 0.25}s`,
+                        }}
+                    />
+                ))}
+
+                <div className="relative px-7 pt-8 pb-7 text-center text-white">
+                    {/* Close button */}
+                    <button
+                        onClick={onIgnore}
+                        className="absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-white/50 text-xl hover:text-white/80 transition-colors"
+                        style={{ background: 'rgba(255,255,255,0.08)' }}
+                    >
+                        ×
+                    </button>
+
+                    {/* Icon */}
+                    <div
+                        className="w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-4"
+                        style={{
+                            background: 'rgba(251,191,36,0.12)',
+                            border: '1.5px solid rgba(251,191,36,0.28)',
+                            boxShadow: '0 0 24px rgba(251,191,36,0.15)',
+                        }}
+                    >
+                        {isCoins ? (
+                            <span
+                                className="text-4xl"
+                                style={{ animation: 'sparkle-blink 1.6s ease-in-out infinite' }}
+                            >
+                                🪙
+                            </span>
                         ) : (
-                            <div className="flex items-center justify-center gap-2">
-                                <span className="text-xl font-black text-indigo-600 uppercase">{reward.subLevel} Access</span>
-                            </div>
+                            <Crown
+                                size={38}
+                                style={{
+                                    color: '#fbbf24',
+                                    filter: 'drop-shadow(0 0 10px rgba(251,191,36,0.7))',
+                                }}
+                            />
                         )}
                     </div>
-                
-                <button 
-                    onClick={onClaim}
-                    className="w-full bg-slate-900 text-white font-bold py-4 rounded-2xl shadow-xl shadow-slate-200 hover:bg-slate-800 hover:scale-[1.02] transition-all active:scale-95 mb-3 flex items-center justify-center gap-2"
-                >
-                    <Gift size={20} className="text-pink-400" /> Claim Reward
-                </button>
-                
-                <button 
-                    onClick={onIgnore}
-                    className="text-xs text-slate-500 font-bold hover:text-slate-600 uppercase tracking-wider"
-                >
-                    Dismiss
-                </button>
+
+                    {/* Eyebrow */}
+                    <p
+                        className="text-[10px] font-black uppercase tracking-widest mb-1"
+                        style={{ color: '#fbbf24', letterSpacing: '0.18em' }}
+                    >
+                        Reward Unlocked!
+                    </p>
+
+                    {/* Main value */}
+                    {isCoins ? (
+                        <div className="my-2">
+                            <span
+                                className="text-7xl font-black"
+                                style={{
+                                    color: '#fbbf24',
+                                    textShadow: '0 0 28px rgba(251,191,36,0.75), 0 0 56px rgba(251,191,36,0.35)',
+                                }}
+                            >
+                                +{reward.amount}
+                            </span>
+                            <p className="text-amber-300 font-bold text-base mt-1">Free Credits</p>
+                        </div>
+                    ) : (
+                        <div className="my-2">
+                            <Crown
+                                size={32}
+                                className="mx-auto mb-2"
+                                style={{ color: '#fbbf24', filter: 'drop-shadow(0 0 8px rgba(251,191,36,0.6))' }}
+                            />
+                            <p className="text-xl font-black text-white">
+                                {reward.subLevel} Access
+                            </p>
+                            {reward.durationHours && (
+                                <p className="text-amber-300 font-bold text-sm mt-1">
+                                    {reward.durationHours}h Subscription
+                                </p>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Label chip */}
+                    <div
+                        className="rounded-2xl px-4 py-2.5 mb-5 mt-3"
+                        style={{
+                            background: 'rgba(255,255,255,0.06)',
+                            border: '1px solid rgba(251,191,36,0.18)',
+                        }}
+                    >
+                        <p className="text-[11px] text-white/60 font-semibold">{reward.label}</p>
+                    </div>
+
+                    {/* Claim button */}
+                    <button
+                        onClick={onClaim}
+                        className="w-full py-3.5 rounded-2xl font-black text-sm text-white hover:opacity-90 active:scale-95 transition-all"
+                        style={{
+                            background: 'linear-gradient(135deg, #f59e0b, #d97706)',
+                            boxShadow: '0 4px 24px rgba(245,158,11,0.45)',
+                        }}
+                    >
+                        🎁 Claim Reward
+                    </button>
+
+                    <button
+                        onClick={onIgnore}
+                        className="mt-3 text-[11px] text-white/35 font-bold uppercase tracking-wider hover:text-white/60 transition-colors"
+                    >
+                        Dismiss
+                    </button>
                 </div>
             </div>
         </div>

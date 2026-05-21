@@ -4,7 +4,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   ClassLevel, Subject, Chapter, AppState, Board, Stream, User, ContentType, SystemSettings, ActivityLogEntry, WeeklyTest, LessonContent, ActiveSubscription, InboxMessage
 } from './types';
-import { getChapterData, saveChapterData, checkFirebaseConnection, saveTestResult, saveUserToLive, updateUserStatus, getUserData, subscribeToSettings, subscribeToUser, auth, savePublicActivity, saveUserHistory, getUserSavedNotes } from './firebase';
+import { getChapterData, saveChapterData, checkFirebaseConnection, saveTestResult, saveUserToLive, updateUserStatus, getUserData, subscribeToSettings, subscribeToUser, auth, savePublicActivity, saveUserHistory, getUserSavedNotes, rtdb } from './firebase';
+import { ref as rtdbRef, set as rtdbSet } from 'firebase/database';
 import { storage } from './utils/storage';
 import { recalculateSubscriptionStatus, addSubscription } from './utils/subscriptionUtils';
 import { signInAnonymously } from 'firebase/auth';
@@ -27,15 +28,15 @@ import { LoadingOverlay } from './components/LoadingOverlay';
 import { RulesPage } from './components/RulesPage';
 import { IICPage } from './components/IICPage';
 import { WeeklyTestView } from './components/WeeklyTestView';
-import { RewardPopup } from './components/RewardPopup';
 import { CreditConfirmationModal } from './components/CreditConfirmationModal';
 import { CustomAlert, CustomConfirm } from './components/CustomDialogs';
 import { MarksheetCard } from './components/MarksheetCard';
 // import { DailyChallengePopup } from './components/DailyChallengePopup';
 import { UpdatePopup } from './components/UpdatePopup'; // NEW
+import { StreakLoginPopup } from './components/StreakLoginPopup';
 import { ErrorBoundary } from './components/ErrorBoundary'; // NEW
 import { generateDailyChallengeQuestions } from './utils/challengeGenerator';
-import { BrainCircuit, Globe, LogOut, LayoutDashboard, BookOpen, Headphones, HelpCircle, Newspaper, KeyRound, Lock, X, ShieldCheck, FileText, UserPlus, EyeOff, WifiOff, Cloud } from 'lucide-react';
+import { BrainCircuit, Globe, LogOut, LayoutDashboard, BookOpen, Headphones, HelpCircle, Newspaper, KeyRound, Lock, X, ShieldCheck, FileText, UserPlus, EyeOff, WifiOff, Cloud, ArrowLeft, ExternalLink } from 'lucide-react';
 import { SUPPORT_EMAIL, APP_VERSION } from './constants';
 import { StudentTab, PendingReward, MCQResult, SubscriptionHistoryEntry } from './types';
 
@@ -185,36 +186,8 @@ const App: React.FC = () => {
   const [isFlashSaleActive, setIsFlashSaleActive] = useState(false);
 
   useEffect(() => {
-      // Check Discount Logic Periodically
-      const checkDiscount = () => {
-          const lastVisitStr = localStorage.getItem('nst_store_last_visit');
-          if (lastVisitStr) {
-              const lastVisit = parseInt(lastVisitStr);
-              const now = Date.now();
-              const oneHour = 60 * 60 * 1000;
-              const twoHours = 2 * 60 * 60 * 1000;
-
-              // Active if > 1 hour AND < 2 hours from visit
-              if (now > (lastVisit + oneHour) && now < (lastVisit + twoHours)) {
-                  setIsFlashSaleActive(true);
-                  // Trigger Notification ONCE per session/activation
-                  const alertKey = `nst_flash_alert_${lastVisit}`;
-                  if (!sessionStorage.getItem(alertKey)) {
-                      setAlertConfig({
-                          isOpen: true,
-                          message: "🔥 Flash Sale Activated! Complete your purchase now for an extra discount!"
-                      });
-                      sessionStorage.setItem(alertKey, 'true');
-                  }
-              } else {
-                  setIsFlashSaleActive(false);
-              }
-          }
-      };
-
-      checkDiscount(); // Initial
-      const interval = setInterval(checkDiscount, 60000); // Check every minute
-      return () => clearInterval(interval);
+      // Flash sale popup disabled — discount is now delivered via mailbox (inbox) when user visits store
+      setIsFlashSaleActive(false);
   }, []);
 
   useEffect(() => {
@@ -285,7 +258,7 @@ const App: React.FC = () => {
         ] as any,
         chatCost: 1,
         dailyReward: 3,
-        signupBonus: 2,
+        signupBonus: 50,
         isChatEnabled: true,
         isGameEnabled: true, 
         allowSignup: true,
@@ -349,27 +322,27 @@ const App: React.FC = () => {
   // BANNER STATE
   const [showTopBanner, setShowTopBanner] = useState(true);
   const [showBottomBanner, setShowBottomBanner] = useState(true);
+  // IN-APP BROWSER (banner tap → iframe overlay instead of new tab)
+  const [inAppBrowserUrl, setInAppBrowserUrl] = useState<string | null>(null);
 
   // BANNER AUTO-HIDE LOGIC
   useEffect(() => {
       const top = state.settings.bannerConfig?.top;
+      setShowTopBanner(true);
       if (top?.enabled && top.autoHideSeconds > 0) {
           const timer = setTimeout(() => setShowTopBanner(false), top.autoHideSeconds * 1000);
           return () => clearTimeout(timer);
-      } else {
-          setShowTopBanner(true);
       }
-  }, [state.settings.bannerConfig?.top?.autoHideSeconds, state.settings.bannerConfig?.top?.enabled]);
+  }, [state.settings.bannerConfig?.top?.autoHideSeconds, state.settings.bannerConfig?.top?.enabled, state.settings.bannerConfig?.top?.text, studentTab]);
 
   useEffect(() => {
       const bottom = state.settings.bannerConfig?.bottom;
+      setShowBottomBanner(true);
       if (bottom?.enabled && bottom.autoHideSeconds > 0) {
           const timer = setTimeout(() => setShowBottomBanner(false), bottom.autoHideSeconds * 1000);
           return () => clearTimeout(timer);
-      } else {
-          setShowBottomBanner(true);
       }
-  }, [state.settings.bannerConfig?.bottom?.autoHideSeconds, state.settings.bannerConfig?.bottom?.enabled]);
+  }, [state.settings.bannerConfig?.bottom?.autoHideSeconds, state.settings.bannerConfig?.bottom?.enabled, state.settings.bannerConfig?.bottom?.text, studentTab]);
 
   useEffect(() => {
     storage.getItem<StudentTab>('nst_active_student_tab').then(saved => {
@@ -377,10 +350,20 @@ const App: React.FC = () => {
     });
   }, []);
 
+    // Active reward generated by study-timer (pushed to inbox when created)
+    const [activeReward, setActiveReward] = useState<PendingReward | null>(null);
+
+  useEffect(() => {
+    if (studentTab === 'HOME' || studentTab === 'HOMEWORK' || studentTab === 'HISTORY' || studentTab === 'PROFILE' || studentTab === 'COMMUNITY_SUPPORT') {
+      setShowTopBanner(true);
+      setShowBottomBanner(true);
+    }
+  }, [studentTab]);
+
   useEffect(() => {
     storage.setItem('nst_active_student_tab', studentTab);
   }, [studentTab]);
-  const [activeReward, setActiveReward] = useState<PendingReward | null>(null);
+  const [streakLoginPopup, setStreakLoginPopup] = useState<{newStreak: number; prevStreak: number; isNewRecord: boolean} | null>(null);
   const [lastTestResult, setLastTestResult] = useState<MCQResult | null>(null);
   const [lastTestQuestions, setLastTestQuestions] = useState<MCQItem[] | null>(null); // NEW: For granular analysis
   
@@ -401,6 +384,7 @@ const App: React.FC = () => {
   
   // FULL SCREEN MODE (Hides Header/Footer/Dock)
   const [isFullScreen, setIsFullScreen] = useState(false);
+  const [isLessonImmersive, setIsLessonImmersive] = useState(false);
   const [popupQueue, setPopupQueue] = useState<('TRACKER' | 'CHALLENGE' | 'WELCOME')[]>([]);
   const [showUpdatePopup, setShowUpdatePopup] = useState(false); // NEW
   const [loadingContentType, setLoadingContentType] = useState<ContentType | undefined>(undefined); // NEW
@@ -478,16 +462,37 @@ const App: React.FC = () => {
 
           if (lastLoginDateString === yesterday.toDateString()) {
               // Consecutive Login: Increment
-              updatedUser.streak = (updatedUser.streak || 0) + 1;
+              const prev = updatedUser.streak || 0;
+              updatedUser.streak = prev + 1;
+              // Track longest streak & award 100 credits for new record
+              const prevLongest = updatedUser.longestStreak || 0;
+              if (updatedUser.streak > prevLongest) {
+                  updatedUser.longestStreak = updatedUser.streak;
+                  if (prevLongest > 0) {
+                      // New record bonus: 100 credits
+                      updatedUser.credits = (updatedUser.credits || 0) + 100;
+                  }
+              }
+              if (!sessionStorage.getItem('nst_streak_popup_shown')) {
+                  sessionStorage.setItem('nst_streak_popup_shown', 'true');
+                  setStreakLoginPopup({ newStreak: updatedUser.streak, prevStreak: prev, isNewRecord: updatedUser.streak > prevLongest && prevLongest > 0 });
+              }
           } else {
               // Streak Broken or First Login: Reset
+              const prev = updatedUser.streak || 0;
               updatedUser.streak = 1;
+              // Update longestStreak if first time
+              if (!updatedUser.longestStreak) updatedUser.longestStreak = 1;
+              if (!sessionStorage.getItem('nst_streak_popup_shown')) {
+                  sessionStorage.setItem('nst_streak_popup_shown', 'true');
+                  setStreakLoginPopup({ newStreak: 1, prevStreak: prev > 1 ? prev : 0, isNewRecord: false });
+              }
           }
       }
 
-      // 1. Daily Login Bonus (Configurable)
+      // 1. Daily Login Bonus (Configurable) → always goes to inbox, no popup
       const lastRewardDate = state.user.lastLoginRewardDate ? new Date(state.user.lastLoginRewardDate).toDateString() : '';
-      if (lastRewardDate !== today && !activeReward && !sessionStorage.getItem('nst_daily_reward_checked')) {
+      if (lastRewardDate !== today && !sessionStorage.getItem('nst_daily_reward_checked')) {
           sessionStorage.setItem('nst_daily_reward_checked', 'true'); // Prevent double-firing
           // Check Streak for Strict Mode
           let streakBroken = false;
@@ -495,47 +500,34 @@ const App: React.FC = () => {
               streakBroken = true;
           }
 
-          if (state.settings.loginBonusConfig?.strictStreak && streakBroken) {
-              // Reset Streak logic handled in updateUserStatus usually, but here we enforce penalty
-              // User request: "strict katega tab next day bonus nahi mikega" -> If streak broken, NO BONUS TODAY
-              updatedUser.lastLoginRewardDate = new Date().toISOString(); // Mark as checked
-              hasUpdates = true;
-              // No reward set
-          } else {
-              // Grant Bonus based on Tier
+          updatedUser.lastLoginRewardDate = new Date().toISOString(); // Mark as checked immediately
+          hasUpdates = true;
+
+          if (!(state.settings.loginBonusConfig?.strictStreak && streakBroken)) {
+              // Grant Bonus based on Tier — push straight to inbox
               let bonusAmount = state.settings.loginBonusConfig?.freeBonus ?? 2;
               if (state.user.subscriptionTier !== 'FREE') {
                   if (state.user.subscriptionLevel === 'BASIC') bonusAmount = state.settings.loginBonusConfig?.basicBonus ?? 5;
                   if (state.user.subscriptionLevel === 'ULTRA') bonusAmount = state.settings.loginBonusConfig?.ultraBonus ?? 10;
               }
 
-              // DO NOT increment credits or update date here yet. Wait for handleClaimReward.
-              // updatedUser.credits = (updatedUser.credits || 0) + bonusAmount;
-              // updatedUser.lastLoginRewardDate = new Date().toISOString();
-              // Just generate the activeReward payload.
-
-              hasUpdates = true;
-
+              const loginExpiryHours = state.settings.rewardExpiryHours ?? 12;
               newReward = {
                   id: `login-bonus-${today}`,
                   type: 'COINS',
                   amount: bonusAmount,
                   label: 'Daily Login Bonus',
-                  expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString()
+                  expiresAt: new Date(now.getTime() + loginExpiryHours * 60 * 60 * 1000).toISOString()
               };
           }
       }
 
-      // 2. Check Pending Unlocks (Prizes)
-      // Only if no new reward set (priority to Login Bonus, next render will handle Prize)
-      if (!newReward && !activeReward && updatedUser.pendingRewards && updatedUser.pendingRewards.length > 0) {
+      // 2. Check Pending Unlocks (Prizes) → push to inbox
+      if (!newReward && updatedUser.pendingRewards && updatedUser.pendingRewards.length > 0) {
           const unlockIndex = updatedUser.pendingRewards.findIndex(r => !r.unlockDate || new Date(r.unlockDate) <= now);
-          
           if (unlockIndex !== -1) {
               const item = updatedUser.pendingRewards[unlockIndex];
               newReward = item;
-              
-              // Remove from pending list (it moved to Active Popup)
               const newPending = [...updatedUser.pendingRewards];
               newPending.splice(unlockIndex, 1);
               updatedUser.pendingRewards = newPending;
@@ -543,7 +535,92 @@ const App: React.FC = () => {
           }
       }
 
+      // Push ALL rewards to inbox (no popup) and show a toast
+      const pushRewardToInbox = (reward: PendingReward) => {
+          const existingInbox = updatedUser.inbox || [];
+          const alreadyInInbox = existingInbox.some(m => m.id === reward.id);
+          if (alreadyInInbox) return;
+          const rewardText = reward.type === 'COINS'
+              ? `${reward.label}: +${reward.amount} Credits received!`
+              : `${reward.label}: ${reward.subLevel || 'BASIC'} Access unlocked!`;
+          const inboxMsg: any = {
+              id: reward.id,
+              text: rewardText,
+              date: new Date().toISOString(),
+              read: false,
+              type: 'REWARD',
+              isClaimed: false,
+              expiresAt: reward.expiresAt,
+          };
+          if (reward.type === 'COINS') {
+              inboxMsg.gift = { type: 'CREDITS', value: reward.amount || 0 };
+          } else {
+              inboxMsg.gift = {
+                  type: 'SUBSCRIPTION',
+                  value: `${reward.subTier || 'WEEKLY'}_${reward.subLevel || 'BASIC'}`,
+                  durationHours: reward.durationHours || 4,
+              };
+          }
+          updatedUser.inbox = [inboxMsg, ...existingInbox];
+          hasUpdates = true;
+          setTimeout(() => setAlertConfig({ isOpen: true, message: `🎁 ${reward.label} received! Go to Mail → Rewards to claim.` }), 1000);
+      };
+
       if (hasUpdates || newReward) {
+          if (newReward) {
+              pushRewardToInbox(newReward);
+              // ── Random Gift alongside login bonus (dice roll) ──
+              const rgCfg = state.settings.loginBonusConfig;
+              if (rgCfg?.randomGiftEnabled && (rgCfg.randomGiftOptions || []).length > 0) {
+                  const chance = rgCfg.randomGiftChance ?? 20;
+                  if (Math.random() * 100 < chance) {
+                      const options = rgCfg.randomGiftOptions!;
+                      const totalWeight = options.reduce((s, o) => s + (o.weight || 1), 0);
+                      let rand = Math.random() * totalWeight;
+                      let chosen = options[0];
+                      for (const opt of options) { rand -= (opt.weight || 1); if (rand <= 0) { chosen = opt; break; } }
+                      const rgId = `login-random-gift-${today}`;
+                      const expiryHrs = state.settings.rewardExpiryHours ?? 12;
+                      if (chosen.type === 'CREDITS') {
+                          pushRewardToInbox({ id: rgId, type: 'COINS', amount: chosen.amount || 5, label: chosen.label || '🎲 Lucky Gift!', expiresAt: new Date(now.getTime() + expiryHrs * 60 * 60 * 1000).toISOString() });
+                      } else if (chosen.type === 'SUBSCRIPTION') {
+                          const hrs = chosen.subTier === 'DAILY' ? 24 : chosen.subTier === 'WEEKLY' ? 168 : 720;
+                          pushRewardToInbox({ id: rgId, type: 'SUBSCRIPTION', label: chosen.label || '🎲 Lucky Subscription!', subTier: chosen.subTier || 'WEEKLY', subLevel: chosen.subLevel || 'BASIC', durationHours: hrs, expiresAt: new Date(now.getTime() + expiryHrs * 60 * 60 * 1000).toISOString() });
+                      } else if (chosen.type === 'DISCOUNT') {
+                          const rgIdD = rgId + '-disc';
+                          if (!(updatedUser.inbox || []).some((m: any) => m.id === rgIdD)) {
+                              const discMsg: any = { id: rgIdD, text: `🎲 Lucky Login Gift!\n\n${chosen.label || 'Aapko special discount mila!'}\n\n🏷️ Aaj aapke login par ${chosen.discountPercent || 10}% store discount mila!\n\nStore mein jao aur enjoy karo!`, date: new Date().toISOString(), read: false, type: 'TEXT' };
+                              updatedUser.inbox = [discMsg, ...(updatedUser.inbox || [])]; hasUpdates = true;
+                          }
+                      } else if (chosen.type === 'EFFECT') {
+                          const rgIdE = rgId + '-eff';
+                          if (!(updatedUser.inbox || []).some((m: any) => m.id === rgIdE)) {
+                              const effMsg: any = { id: rgIdE, text: `🎲 Lucky Effect Gift!\n\n${chosen.label || 'Special animation effect mila!'}\n\n✨ Aapko yeh animation mila: ${chosen.effectId || ''}\n\nRedeem section mein dalein ya admin se contact karein!`, date: new Date().toISOString(), read: false, type: 'TEXT' };
+                              updatedUser.inbox = [effMsg, ...(updatedUser.inbox || [])]; hasUpdates = true;
+                          }
+                      }
+                  }
+              }
+          }
+          // ── Streak Milestone Rewards (3, 7, 14, 30 days) ──
+          const currentStreak = updatedUser.streak || 0;
+          const STREAK_MILESTONES: Record<number, number> = { 3: 25, 7: 50, 14: 120, 30: 300 };
+          if (STREAK_MILESTONES[currentStreak] !== undefined) {
+              const milestoneCoins = STREAK_MILESTONES[currentStreak];
+              const milestoneId = `streak-milestone-${currentStreak}-${today.replace(/\s/g, '-')}`;
+              const milestoneLabel = `🔥 ${currentStreak}-Day Streak Reward!`;
+              const expiryHrs = state.settings.rewardExpiryHours ?? 24;
+              if (!(updatedUser.inbox || []).some((m: any) => m.id === milestoneId)) {
+                  pushRewardToInbox({
+                      id: milestoneId,
+                      type: 'COINS',
+                      amount: milestoneCoins,
+                      label: milestoneLabel,
+                      expiresAt: new Date(now.getTime() + expiryHrs * 60 * 60 * 1000).toISOString(),
+                  });
+              }
+          }
+
           if (hasUpdates) {
               // SAFE IMPERSONATION: Only save if NOT impersonating
               if (!state.originalAdmin) {
@@ -552,11 +629,8 @@ const App: React.FC = () => {
               }
               setState(prev => ({...prev, user: updatedUser}));
           }
-          if (newReward) {
-              setActiveReward(newReward);
-          }
       }
-  }, [state.user?.id, state.user?.lastLoginRewardDate, activeReward, state.originalAdmin]); // Re-run when user or activeReward changes
+  }, [state.user?.id, state.user?.lastLoginRewardDate, state.originalAdmin]);
 
   // --- ONLINE/OFFLINE DETECTOR & SYNC ---
   useEffect(() => {
@@ -604,6 +678,13 @@ const App: React.FC = () => {
 
       if (state.user && !state.originalAdmin) {
           unsubscribeUser = subscribeToUser(state.user.id, (cloudUser) => {
+              // Account deleted by admin — force logout immediately
+              if (!cloudUser) {
+                  localStorage.removeItem('nst_current_user');
+                  localStorage.removeItem('nst_users');
+                  setState(prev => ({ ...prev, user: null, view: 'AUTH' }));
+                  return;
+              }
               if (cloudUser) {
                   setState(prev => {
                       if (!prev.user) return prev;
@@ -831,12 +912,17 @@ const App: React.FC = () => {
       const checkExpiry = () => {
           // 1. Recalculate Status (Handles expirations and best tier logic)
           const updatedUser = recalculateSubscriptionStatus(state.user!, state.settings);
+          const expiredNow = Boolean(
+            state.user?.isPremium &&
+            state.user?.subscriptionEndDate &&
+            new Date(state.user.subscriptionEndDate).getTime() <= Date.now()
+          );
 
           // Detect Change (Downgrade or Expiry)
           const wasPremium = state.user!.isPremium;
           const isNowPremium = updatedUser.isPremium;
 
-          if (JSON.stringify(updatedUser) !== JSON.stringify(state.user)) {
+          if (expiredNow || JSON.stringify(updatedUser) !== JSON.stringify(state.user)) {
                localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
                saveUserToLive(updatedUser);
 
@@ -858,7 +944,7 @@ const App: React.FC = () => {
                        selectedClass: nextClass
                    }));
                    setAlertConfig({isOpen: true, message: "Your subscription has expired. Premium features are locked."});
-               } else {
+              } else {
                    // Just update state silently
                    setState(prev => ({...prev, user: updatedUser}));
                }
@@ -1021,6 +1107,7 @@ const App: React.FC = () => {
                 
                 // NEW: CHECK FOR DAILY REWARDS (DYNAMIC)
                 if (state.user && state.settings.engagementRewards) {
+                    const engExpiryHours = state.settings.rewardExpiryHours ?? 12;
                     state.settings.engagementRewards.forEach(reward => {
                         if (reward.enabled && next === reward.seconds) {
                              setActiveReward({
@@ -1031,8 +1118,18 @@ const App: React.FC = () => {
                                 subLevel: reward.subLevel,
                                 durationHours: reward.durationHours,
                                 label: reward.label,
-                                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-                            });
+                                expiresAt: new Date(Date.now() + engExpiryHours * 60 * 60 * 1000).toISOString(),
+                                // Carry redeem code config if set
+                                generateRedeemCode: reward.generateRedeemCode,
+                                redeemCodeType: reward.redeemCodeType,
+                                redeemCodeAmount: reward.redeemCodeAmount,
+                                redeemCodeDiscountPercent: reward.redeemCodeDiscountPercent,
+                                redeemCodeSubTier: reward.redeemCodeSubTier,
+                                redeemCodeSubLevel: reward.redeemCodeSubLevel,
+                                redeemCodeExpiryHours: reward.redeemCodeExpiryHours,
+                                redeemCodeContentId: reward.redeemCodeContentId,
+                                redeemCodeEffectColor: reward.redeemCodeEffectColor,
+                            } as any);
                         }
                     });
                 }
@@ -1047,6 +1144,97 @@ const App: React.FC = () => {
         if (interval) clearInterval(interval);
     };
   }, [state.user?.id, state.view]); 
+
+    // When an `activeReward` is set (by the study timer), push it to the user's inbox
+    useEffect(() => {
+        if (!activeReward || !state.user) return;
+
+        const updatedUser = { ...state.user } as any;
+        const existingInbox = updatedUser.inbox || [];
+        const alreadyInInbox = existingInbox.some((m: any) => m.id === activeReward.id);
+        if (!alreadyInInbox) {
+            const rewardText = activeReward.type === 'COINS'
+                ? `${activeReward.label}: +${activeReward.amount} Credits received!`
+                : `${activeReward.label}: ${activeReward.subLevel || 'BASIC'} Access unlocked!`;
+
+            const inboxMsg: any = {
+                id: activeReward.id,
+                text: rewardText,
+                date: new Date().toISOString(),
+                read: false,
+                type: 'REWARD',
+                isClaimed: false,
+                expiresAt: activeReward.expiresAt
+            };
+
+            if (activeReward.type === 'COINS') {
+                inboxMsg.gift = { type: 'CREDITS', value: activeReward.amount || 0 };
+            } else {
+                inboxMsg.gift = {
+                    type: 'SUBSCRIPTION',
+                    value: `${activeReward.subTier || 'WEEKLY'}_${activeReward.subLevel || 'BASIC'}`,
+                    durationHours: activeReward.durationHours || 4
+                };
+            }
+
+            updatedUser.inbox = [inboxMsg, ...existingInbox];
+
+            // Auto-generate Redeem Code if configured
+            const ar = activeReward as any;
+            if (ar.generateRedeemCode && ar.redeemCodeType && state.user.email) {
+                try {
+                    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+                    const genCode = Array.from({ length: 16 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+                    const codeExpiryHours = ar.redeemCodeExpiryHours ?? 24;
+                    const codeExpiry = new Date(Date.now() + codeExpiryHours * 60 * 60 * 1000).toISOString();
+                    const codeData: any = {
+                        code: genCode,
+                        type: ar.redeemCodeType,
+                        amount: ar.redeemCodeAmount || 0,
+                        discountPercent: ar.redeemCodeDiscountPercent || 0,
+                        subTier: ar.redeemCodeSubTier || 'WEEKLY',
+                        subLevel: ar.redeemCodeSubLevel || 'BASIC',
+                        contentId: ar.redeemCodeContentId || '',
+                        effectColor: ar.redeemCodeEffectColor || '',
+                        maxUses: 1,
+                        usedCount: 0,
+                        isRedeemed: false,
+                        redeemedBy: [],
+                        createdAt: new Date().toISOString(),
+                        expiresAt: codeExpiry,
+                        generatedBy: 'ENGAGEMENT_REWARD',
+                        forUserId: state.user.id,
+                    };
+                    if (rtdb) {
+                        rtdbSet(rtdbRef(rtdb, `redeem_codes/${genCode}`), codeData).catch(() => {});
+                    }
+                    // Add code to inbox as special message
+                    const codeMsg: any = {
+                        id: `code-${activeReward.id}`,
+                        text: `🎁 Engagement Reward Code: Aapko ek special redeem code mila! Code: ${genCode} | Valid ${codeExpiryHours} hours | ${ar.redeemCodeType === 'CREDITS' ? `+${ar.redeemCodeAmount} Credits` : ar.redeemCodeType === 'SUBSCRIPTION' ? `${ar.redeemCodeSubTier} ${ar.redeemCodeSubLevel} Plan` : ar.redeemCodeType === 'DISCOUNT' ? `${ar.redeemCodeDiscountPercent}% Discount` : 'Special Unlock'} | Store mein ja ke Redeem karo!`,
+                        date: new Date().toISOString(),
+                        read: false,
+                        type: 'GIFT',
+                        isClaimed: false,
+                        expiresAt: codeExpiry,
+                        gift: { type: 'CREDITS', value: 0 },
+                    };
+                    updatedUser.inbox = [codeMsg, ...updatedUser.inbox];
+                } catch (_) {}
+            }
+
+            // Persist
+            if (!state.originalAdmin) {
+                localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
+                saveUserToLive(updatedUser);
+            }
+            setState(prev => ({ ...prev, user: updatedUser }));
+            setAlertConfig({ isOpen: true, message: `🎁 ${activeReward.label} received! Go to Mail → Rewards to claim.` });
+        }
+
+        // Clear activeReward after processing
+        setActiveReward(null);
+    }, [activeReward]);
 
   useEffect(() => {
       document.title = `${state.settings.appName}`;
@@ -1203,8 +1391,11 @@ const App: React.FC = () => {
        performLogout();
        return;
     }
+    const isPremiumActive = state.user.isPremium && state.user.subscriptionEndDate && new Date(state.user.subscriptionEndDate) > new Date();
+    const subLevel = state.user.subscriptionLevel;
+    const logoutSecs = isPremiumActive ? (subLevel === 'ULTRA' ? 1 : 3) : 5;
     setLogoutPending(true);
-    setLogoutTimeLeft(10);
+    setLogoutTimeLeft(logoutSecs);
   };
 
   const handleMCQComplete = (score: number, answers: Record<number, number>, displayData: MCQItem[], timeTaken: number) => {
@@ -1914,73 +2105,6 @@ const App: React.FC = () => {
       setIsFullScreen(true);
   };
 
-  const handleClaimReward = () => {
-      if (!activeReward || !state.user) return;
-
-      let updatedUser = { ...state.user };
-      if (activeReward.id.startsWith('login-bonus-')) {
-          updatedUser.lastLoginRewardDate = new Date().toISOString();
-      }
-
-      if (activeReward.type === 'COINS') {
-          updatedUser.credits = (updatedUser.credits || 0) + (activeReward.amount || 0);
-      } else if (activeReward.type === 'SUBSCRIPTION') {
-          // Use addSubscription to stack/manage concurrent subscriptions
-          const newSub: ActiveSubscription = {
-              id: `rew-${Date.now()}`,
-              tier: activeReward.subTier as any || 'WEEKLY',
-              level: activeReward.subLevel || 'BASIC',
-              startDate: new Date().toISOString(),
-              endDate: new Date(Date.now() + (activeReward.durationHours || 4) * 60 * 60 * 1000).toISOString(),
-              source: 'REWARD'
-          };
-          updatedUser = addSubscription(updatedUser, newSub, state.settings);
-          updatedUser.grantedByAdmin = true;
-
-          // RECORD HISTORY
-          const historyEntry: SubscriptionHistoryEntry = {
-              id: `hist-${Date.now()}`,
-              tier: activeReward.subTier || 'WEEKLY',
-              level: activeReward.subLevel || 'BASIC',
-              startDate: new Date().toISOString(),
-              endDate: newSub.endDate,
-              durationHours: activeReward.durationHours || 4,
-              price: 0,
-              originalPrice: 99, // Estimated Value
-              isFree: true,
-              grantSource: 'REWARD'
-          };
-          updatedUser.subscriptionHistory = [historyEntry, ...(updatedUser.subscriptionHistory || [])];
-      }
-
-      if (!state.originalAdmin) {
-          localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
-          saveUserToLive(updatedUser);
-      }
-      setState(prev => ({...prev, user: updatedUser}));
-      setActiveReward(null);
-      setAlertConfig({isOpen: true, message: `🎉 Reward Claimed: ${activeReward.label}`});
-  };
-
-  const handleIgnoreReward = () => {
-      if (!activeReward || !state.user) return;
-
-      const updatedUser = {
-          ...state.user,
-          pendingRewards: [...(state.user.pendingRewards || []), activeReward]
-      };
-
-      if (activeReward.id.startsWith('login-bonus-')) {
-          updatedUser.lastLoginRewardDate = new Date().toISOString();
-      }
-
-      if (!state.originalAdmin) {
-          localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
-          saveUserToLive(updatedUser);
-      }
-      setState(prev => ({...prev, user: updatedUser}));
-      setActiveReward(null);
-  };
 
   const handleStartWeeklyTest = (test: WeeklyTest) => {
     setActiveWeeklyTest(test);
@@ -2298,18 +2422,30 @@ const App: React.FC = () => {
   // cached Firebase data and show only a thin top banner so the user knows.
   // The banner is rendered alongside the rest of the app (see top-of-tree below).
 
+  const getUserPlan = (): 'FREE' | 'BASIC' | 'ULTRA' => {
+      if (!state.user?.isPremium) return 'FREE';
+      if (state.user?.subscriptionLevel === 'ULTRA') return 'ULTRA';
+      return 'BASIC';
+  };
+
   if (isAppLoading) {
-      return <AppLoadingScreen isPremium={state.user?.isPremium || false} onComplete={() => setIsAppLoading(false)} />;
+      return <AppLoadingScreen isPremium={state.user?.isPremium || false} subscriptionLevel={getUserPlan()} onComplete={() => setIsAppLoading(false)} />;
   }
 
   return (
     <ErrorBoundary>
     <div className="min-h-[100dvh] flex flex-col bg-white font-sans relative pt-[env(safe-area-inset-top,24px)] pb-[env(safe-area-inset-bottom,0px)]">
-      {/* OFFLINE INDICATOR — non-blocking thin banner. App keeps running on cached data. */}
+      {/* OFFLINE INDICATOR — scrolling marquee ticker, flows above the top bar without covering it */}
       {!isOnline && (
-        <div className="fixed top-0 inset-x-0 z-[9998] bg-amber-500 text-white text-[11px] font-black uppercase tracking-widest py-1.5 px-3 flex items-center justify-center gap-2 shadow-md pointer-events-none animate-in slide-in-from-top">
-          <WifiOff size={12} />
-          <span>Offline mode — saved content available</span>
+        <div className="w-full shrink-0 bg-amber-500 text-white overflow-hidden" style={{ height: '22px', zIndex: 9998 }}>
+          <div className="offline-marquee flex items-center h-full gap-20 whitespace-nowrap" style={{ animation: 'offlineMarquee 14s linear infinite' }}>
+            {[0,1,2,3].map(i => (
+              <span key={i} className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider shrink-0">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55M5 12.55a10.94 10.94 0 0 1 5.17-2.39M10.71 5.05A16 16 0 0 1 22.56 9M1.42 9a15.91 15.91 0 0 1 4.7-2.88M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/></svg>
+                Offline — Saved content available
+              </span>
+            ))}
+          </div>
         </div>
       )}
       {/* LOGOUT OVERLAY */}
@@ -2434,21 +2570,53 @@ const App: React.FC = () => {
       </div>
       )}
       
+      {/* PLAN-SPECIFIC BANNER */}
+      {(() => {
+          const plan = getUserPlan();
+          const pb = state.settings.planBanners;
+          const planCfg = plan === 'ULTRA' ? pb?.ultra : plan === 'BASIC' ? pb?.basic : pb?.free;
+          if (!planCfg?.enabled || !planCfg?.text) return null;
+          return (
+              <div
+                  className="banner-premium-shimmer text-[11px] font-black tracking-widest uppercase py-1.5 overflow-hidden relative whitespace-nowrap z-[51] transition-all duration-500 ease-in-out"
+                  style={{
+                      background: planCfg.bgColor
+                          ? `linear-gradient(90deg, ${planCfg.bgColor}ee, ${planCfg.bgColor}cc, ${planCfg.bgColor}ee)`
+                          : 'linear-gradient(90deg, #64748b, #475569, #64748b)',
+                      color: planCfg.textColor || '#ffffff',
+                      textShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                  }}
+              >
+                  <div className="animate-marquee">
+                      <span className="px-4">✦ &nbsp;{planCfg.text}&nbsp; ✦ &nbsp;{planCfg.text}&nbsp;</span>
+                      <span className="px-4">✦ &nbsp;{planCfg.text}&nbsp; ✦ &nbsp;{planCfg.text}&nbsp;</span>
+                  </div>
+              </div>
+          );
+      })()}
+
       {/* GLOBAL LIVE DASHBOARD 1 (TOP) */}
       {state.settings.bannerConfig?.top?.enabled && showTopBanner && (
           <div
-            className="text-[10px] font-bold py-1 overflow-hidden relative whitespace-nowrap z-50 transition-all duration-500 ease-in-out"
+            className={`banner-premium-shimmer text-[11px] font-black tracking-widest uppercase py-1.5 overflow-hidden relative whitespace-nowrap z-50 transition-all duration-500 ease-in-out ${state.settings.bannerConfig.top.clickUrl ? 'cursor-pointer active:opacity-70' : ''}`}
             style={{
-                backgroundColor: state.settings.bannerConfig.top.bgColor || '#dc2626',
+                background: state.settings.bannerConfig.top.bgColor
+                    ? `linear-gradient(90deg, ${state.settings.bannerConfig.top.bgColor}ee, ${state.settings.bannerConfig.top.bgColor}cc, ${state.settings.bannerConfig.top.bgColor}ee)`
+                    : 'linear-gradient(90deg, #7c3aed, #4f46e5, #7c3aed)',
                 color: state.settings.bannerConfig.top.textColor || '#ffffff',
                 height: showTopBanner ? 'auto' : '0',
-                opacity: showTopBanner ? 1 : 0
+                opacity: showTopBanner ? 1 : 0,
+                textShadow: '0 1px 3px rgba(0,0,0,0.4)',
+            }}
+            onClick={() => {
+                try { if (navigator.vibrate) navigator.vibrate(25); } catch {}
+                const url = state.settings.bannerConfig?.top?.clickUrl;
+                if (url) setInAppBrowserUrl(url);
             }}
           >
-              <div className="animate-marquee inline-block">
-                  {state.settings.bannerConfig.top.text} &nbsp;&nbsp;&bull;&nbsp;&nbsp;
-                  {state.settings.bannerConfig.top.text} &nbsp;&nbsp;&bull;&nbsp;&nbsp;
-                  {state.settings.bannerConfig.top.text}
+              <div className="animate-marquee">
+                  <span className="px-4">✦ &nbsp;{state.settings.bannerConfig.top.text}&nbsp; ✦ &nbsp;{state.settings.bannerConfig.top.text}&nbsp;</span>
+                  <span className="px-4">✦ &nbsp;{state.settings.bannerConfig.top.text}&nbsp; ✦ &nbsp;{state.settings.bannerConfig.top.text}&nbsp;</span>
               </div>
           </div>
       )}
@@ -2462,7 +2630,7 @@ const App: React.FC = () => {
           </div>
       )}
 
-      {!isFullScreen && state.view !== 'STUDENT_DASHBOARD' && (
+      {!isFullScreen && state.view !== 'STUDENT_DASHBOARD' && !isLessonImmersive && (
       <header className="bg-white sticky top-0 z-30 shadow-sm border-b border-slate-100">
         <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
            <div onClick={() => setState(prev => ({ ...prev, view: (state.user?.role === 'ADMIN' || state.user?.role === 'SUB_ADMIN') ? 'ADMIN_DASHBOARD' : 'STUDENT_DASHBOARD' as any }))} className="flex items-center gap-2 cursor-pointer">
@@ -2507,7 +2675,7 @@ const App: React.FC = () => {
 
       <main className={`flex-1 w-full max-w-6xl mx-auto ${isFullScreen ? 'p-0' : 'p-4 mb-8'}`}>
         {!state.user ? (
-            <Auth onLogin={handleLogin} logActivity={logActivity} />
+            <Auth onLogin={handleLogin} logActivity={logActivity} appSettings={state.settings} />
         ) : (
             <ErrorBoundary>
             <>
@@ -2561,7 +2729,7 @@ const App: React.FC = () => {
                 
                 {(!activeWeeklyTest && state.view === 'BOARDS') && <BoardSelection onSelect={handleBoardSelect} onBack={goBack} />}
                 {state.view === 'ONBOARDING' && state.user && <Onboarding user={state.user} onComplete={handleLogin} onLogout={handleLogout} />}
-                {state.view === 'CLASSES' && <ClassSelection selectedBoard={state.selectedBoard} allowedClasses={state.user?.role === 'ADMIN' ? undefined : state.settings.allowedClasses} settings={state.settings} user={state.user} onSelect={handleClassSelect} onBack={goBack} />}
+                {state.view === 'CLASSES' && <ClassSelection selectedBoard={state.selectedBoard} allowedClasses={state.user?.role === 'ADMIN' ? undefined : state.settings.allowedClasses} settings={state.settings} user={state.user} onSelect={handleClassSelect} onBack={goBack} onBoardSwitch={(board) => setState(prev => ({ ...prev, selectedBoard: board, language: board === 'BSEB' ? 'Hindi' : 'English' }))} />}
                 {state.view === 'STREAMS' && <StreamSelection onSelect={handleStreamSelect} onBack={goBack} />}
                 {state.view === 'SUBJECTS' && state.selectedClass && <SubjectSelection classLevel={state.selectedClass} stream={state.selectedStream} board={state.selectedBoard || undefined} onSelect={handleSubjectSelect} onBack={goBack} settings={state.settings} />}
                 {state.view === 'CHAPTERS' && state.selectedSubject && <ChapterSelection chapters={state.chapters} subject={state.selectedSubject} classLevel={state.selectedClass!} loading={state.loading && state.view === 'CHAPTERS'} user={state.user} onSelect={onChapterClick} onBack={goBack}/>}
@@ -2579,6 +2747,7 @@ const App: React.FC = () => {
                         isStreaming={isStreaming}
                         onLaunchContent={(c: any) => handleContentGeneration(c.isPremium ? 'NOTES_PREMIUM' : 'NOTES_HTML_FREE', undefined, false, c)}
                         onToggleAutoTts={handleToggleAutoTts}
+                        onImmersiveChange={setIsLessonImmersive}
                     />
                 )}
             </>
@@ -2587,7 +2756,7 @@ const App: React.FC = () => {
       </main>
       
       {/* PERSISTENT FOOTER - Hide in Student Dashboard as it has its own Bottom Nav */}
-      {!isFullScreen && state.view !== 'STUDENT_DASHBOARD' && state.settings.showFooter !== false && (
+      {!isFullScreen && state.view !== 'STUDENT_DASHBOARD' && state.settings.showFooter !== false && !isLessonImmersive && (
       <footer className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 py-1 text-center z-[40]">
           <p
             className="text-[10px] font-black uppercase tracking-widest"
@@ -2601,18 +2770,25 @@ const App: React.FC = () => {
       {/* GLOBAL LIVE DASHBOARD 2 (BOTTOM) */}
       {state.settings.bannerConfig?.bottom?.enabled && showBottomBanner && (
           <div
-            className="fixed bottom-6 left-0 right-0 text-[10px] font-bold py-1 overflow-hidden relative whitespace-nowrap z-[39] transition-all duration-500 ease-in-out"
+            className={`banner-premium-shimmer fixed bottom-6 left-0 right-0 text-[11px] font-black tracking-widest uppercase py-1.5 overflow-hidden relative whitespace-nowrap z-[39] transition-all duration-500 ease-in-out ${state.settings.bannerConfig.bottom.clickUrl ? 'cursor-pointer active:opacity-70' : ''}`}
             style={{
-                backgroundColor: state.settings.bannerConfig.bottom.bgColor || '#2563eb',
+                background: state.settings.bannerConfig.bottom.bgColor
+                    ? `linear-gradient(90deg, ${state.settings.bannerConfig.bottom.bgColor}ee, ${state.settings.bannerConfig.bottom.bgColor}cc, ${state.settings.bannerConfig.bottom.bgColor}ee)`
+                    : 'linear-gradient(90deg, #2563eb, #1d4ed8, #2563eb)',
                 color: state.settings.bannerConfig.bottom.textColor || '#ffffff',
                 height: showBottomBanner ? 'auto' : '0',
-                opacity: showBottomBanner ? 1 : 0
+                opacity: showBottomBanner ? 1 : 0,
+                textShadow: '0 1px 3px rgba(0,0,0,0.3)',
+            }}
+            onClick={() => {
+                try { if (navigator.vibrate) navigator.vibrate(25); } catch {}
+                const url = state.settings.bannerConfig?.bottom?.clickUrl;
+                if (url) setInAppBrowserUrl(url);
             }}
           >
-              <div className="animate-marquee-reverse inline-block">
-                  {state.settings.bannerConfig.bottom.text} &nbsp;&nbsp;&bull;&nbsp;&nbsp;
-                  {state.settings.bannerConfig.bottom.text} &nbsp;&nbsp;&bull;&nbsp;&nbsp;
-                  {state.settings.bannerConfig.bottom.text}
+              <div className="animate-marquee-reverse">
+                  <span className="px-4">✦ &nbsp;{state.settings.bannerConfig.bottom.text}&nbsp; ✦ &nbsp;{state.settings.bannerConfig.bottom.text}&nbsp;</span>
+                  <span className="px-4">✦ &nbsp;{state.settings.bannerConfig.bottom.text}&nbsp; ✦ &nbsp;{state.settings.bannerConfig.bottom.text}&nbsp;</span>
               </div>
           </div>
       )}
@@ -2636,7 +2812,16 @@ const App: React.FC = () => {
       )}
       
 
-      {activeReward && <RewardPopup reward={activeReward} onClaim={handleClaimReward} onIgnore={handleIgnoreReward} />}
+      {/* LOGIN STREAK POPUP */}
+      {streakLoginPopup && state.user && (
+        <StreakLoginPopup
+          newStreak={streakLoginPopup.newStreak}
+          prevStreak={streakLoginPopup.prevStreak}
+          isNewRecord={streakLoginPopup.isNewRecord}
+          onClose={() => setStreakLoginPopup(null)}
+          language={state.language}
+        />
+      )}
       
       {/* POPUP QUEUE MANAGER */}
       {/* {popupQueue.length > 0 && !showPremiumModal && !activeWeeklyTest && (
@@ -2724,6 +2909,89 @@ const App: React.FC = () => {
                   localStorage.setItem(`nst_update_dismissed_${state.settings.latestVersion}`, Date.now().toString());
               }}
           />
+      )}
+
+      {/* ============================================================ */}
+      {/* IN-APP BROWSER OVERLAY — banner tap se khulta hai            */}
+      {/* ============================================================ */}
+      {inAppBrowserUrl && (
+          <div className="fixed inset-0 z-[9999] flex flex-col bg-white" style={{paddingTop: 'env(safe-area-inset-top)'}}>
+              {/* Top bar */}
+              <div className="relative flex items-center gap-2 px-3 py-2 shrink-0 overflow-hidden" style={{
+                minHeight: '52px',
+                background: 'linear-gradient(135deg,#0d0d20 0%,#1a0a35 60%,#0a1020 100%)',
+              }}>
+                {/* Subtle shimmer */}
+                <div className="absolute inset-0 pointer-events-none" style={{
+                  background: 'linear-gradient(105deg,transparent 30%,rgba(139,92,246,0.08) 50%,transparent 70%)',
+                  backgroundSize: '200% 100%',
+                  animation: 'shimmer-sweep 3s linear infinite',
+                }} />
+                {/* Back button — glow */}
+                <button
+                    onClick={() => setInAppBrowserUrl(null)}
+                    className="relative p-2 rounded-full transition-all active:scale-90 shrink-0"
+                    style={{
+                      background: 'rgba(139,92,246,0.15)',
+                      border: '1px solid rgba(139,92,246,0.4)',
+                      boxShadow: '0 0 10px rgba(139,92,246,0.4), inset 0 0 6px rgba(139,92,246,0.1)',
+                      color: '#c4b5fd',
+                    }}
+                    aria-label="Back"
+                >
+                    <ArrowLeft size={18} />
+                </button>
+
+                {/* EXCLUSIVE MCQ badge — center */}
+                <div className="flex-1 flex items-center justify-center">
+                  <div className="relative flex items-center gap-2 px-4 py-1.5 rounded-full overflow-hidden" style={{
+                    background: 'linear-gradient(90deg,rgba(139,92,246,0.2),rgba(99,102,241,0.15),rgba(139,92,246,0.2))',
+                    border: '1px solid rgba(139,92,246,0.45)',
+                    boxShadow: '0 0 14px rgba(139,92,246,0.3)',
+                  }}>
+                    {/* Inner shimmer */}
+                    <div className="absolute inset-0 pointer-events-none" style={{
+                      background: 'linear-gradient(105deg,transparent 20%,rgba(196,181,253,0.15) 50%,transparent 80%)',
+                      backgroundSize: '200% 100%',
+                      animation: 'shimmer-sweep 2.5s linear infinite',
+                    }} />
+                    <span className="text-sm relative z-10" style={{ animation: 'sparkle-blink 2s ease-in-out infinite' }}>⚡</span>
+                    <span className="relative z-10 font-black tracking-[0.15em] text-xs uppercase" style={{
+                      background: 'linear-gradient(90deg,#a78bfa,#e0d7ff,#c4b5fd,#818cf8,#e0d7ff,#a78bfa)',
+                      backgroundSize: '300% 100%',
+                      WebkitBackgroundClip: 'text',
+                      WebkitTextFillColor: 'transparent',
+                      animation: 'shimmer-sweep 2s linear infinite',
+                    }}>Exclusive MCQ</span>
+                    <span className="text-sm relative z-10" style={{ animation: 'sparkle-blink 2s ease-in-out infinite 0.5s' }}>⚡</span>
+                  </div>
+                </div>
+
+                {/* Close button — glow */}
+                <button
+                    onClick={() => setInAppBrowserUrl(null)}
+                    className="relative p-2 rounded-full transition-all active:scale-90 shrink-0"
+                    style={{
+                      background: 'rgba(239,68,68,0.12)',
+                      border: '1px solid rgba(239,68,68,0.35)',
+                      boxShadow: '0 0 10px rgba(239,68,68,0.3), inset 0 0 6px rgba(239,68,68,0.08)',
+                      color: '#fca5a5',
+                    }}
+                    aria-label="Close"
+                >
+                    <X size={18} />
+                </button>
+              </div>
+
+              {/* iframe */}
+              <iframe
+                  src={inAppBrowserUrl}
+                  className="flex-1 w-full border-none"
+                  title="In-App Browser"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+              />
+          </div>
       )}
     </div>
     </ErrorBoundary>

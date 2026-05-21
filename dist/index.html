@@ -144,6 +144,72 @@
           .notes-html-content h1 { font-size: 2.25em; }
           .notes-html-content h2 { font-size: 1.75em; }
       }
+      /* Override any .container / .wrapper / body wrappers inside user HTML notes
+         so they don't add extra max-width, margins, or padding that create whitespace */
+      .notes-html-content .container,
+      .notes-html-content .wrapper,
+      .notes-html-content .content,
+      .notes-html-content .card,
+      .notes-html-content main,
+      .notes-html-content article,
+      .notes-html-content section {
+          max-width: 100% !important;
+          width: 100% !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+          padding-left: 0 !important;
+          padding-right: 0 !important;
+          box-sizing: border-box !important;
+      }
+      /* body/html inside HTML notes should not add background or extra spacing */
+      .notes-html-content body,
+      .notes-html-content html { margin: 0 !important; padding: 0 !important; background: transparent !important; }
+      /* section-box style divs — keep vertical padding but remove horizontal */
+      .notes-html-content [class*="section"],
+      .notes-html-content [class*="box"] {
+          padding-left: 8px !important;
+          padding-right: 8px !important;
+          box-sizing: border-box !important;
+      }
+      /* ── CARD FLATTENING: Remove floating card effects from all div/section containers
+         so admin HTML renders as a clean flowing document, not multiple floating cards.
+         CSS !important overrides inline style="" attributes that lack !important. ── */
+      .notes-html-content div,
+      .notes-html-content section,
+      .notes-html-content article,
+      .notes-html-content aside,
+      .notes-html-content header,
+      .notes-html-content footer,
+      .notes-html-content main {
+          box-shadow: none !important;
+          border: none !important;
+          border-radius: 0 !important;
+          max-width: 100% !important;
+          width: auto !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+          float: none !important;
+          position: relative !important;
+      }
+      /* Keep top/bottom margins small so sections don't gap too much */
+      .notes-html-content div + div,
+      .notes-html-content section + section {
+          margin-top: 0.5em !important;
+      }
+      /* Keep colored backgrounds (admin's section headers) but strip card styling */
+      /* Tables, images, code blocks keep their own styling */
+      .notes-html-content table,
+      .notes-html-content img,
+      .notes-html-content video,
+      .notes-html-content iframe,
+      .notes-html-content pre,
+      .notes-html-content code {
+          border-radius: 8px !important;
+      }
+      .notes-html-content table {
+          border: 1px solid #e2e8f0 !important;
+          border-radius: 8px !important;
+      }
     </style>
 <style>
   /* Hides the Google Translate top banner/frame completely */
@@ -157,8 +223,8 @@
   /* Optional: Hide the Google Translate widget completely if it decides to pop up */
   #goog-gt-tt { display: none !important; }
 </style>
-  <script type="module" crossorigin src="/assets/index-DwnL2sjj.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-DF8qgi1v.css">
+  <script type="module" crossorigin src="/assets/index-BYdJwW0O.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-BEsRsJRa.css">
 <link rel="manifest" href="/manifest.webmanifest"></head>
   <body class="bg-slate-200 text-slate-900 min-h-[100dvh] flex justify-center translate-body">
     <!-- Google Translate Script -->

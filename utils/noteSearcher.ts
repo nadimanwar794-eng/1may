@@ -16,14 +16,16 @@ export interface NoteSearchResult {
   classLevel: string;
   // Best matching note within the chapter
   noteTitle: string;
-  noteContent: string;   // raw text (HTML stripped)
-  matchCount: number;    // how many unique query words matched
+  noteContent: string;      // ~360 char snippet around the match
+  noteFullContent: string;  // full plain text of the matched blob (for Compare view)
+  matchCount: number;       // how many unique query words matched
   matchedWords: string[];
   // So the caller can open the chapter
   chapterTitleFromKey: string;
   // Source info — book name and page/topic number
   bookName?: string;     // admin-set book name (e.g. "Lucent GK") or subject name
   pageNo?: string;       // page number string or topic identifier (e.g. "42", "Topic 3")
+  topicName?: string;    // admin-tagged topic name for topic-wise compare matching
 }
 
 /** Strip HTML tags and collapse whitespace to get plain text. */
@@ -232,6 +234,7 @@ export async function searchNotesByWords(
       classLevel: meta.classLevel,
       noteTitle: bestBlob.title || defaultSubject,
       noteContent: snippet,
+      noteFullContent: bestBlob.text,
       matchCount: bestCount,
       matchedWords: bestWords,
       chapterTitleFromKey: meta.chapterId,
@@ -244,4 +247,132 @@ export async function searchNotesByWords(
   results.sort((a, b) => b.matchCount - a.matchCount || b.noteContent.length - a.noteContent.length);
 
   return results.slice(0, maxResults);
+}
+
+/**
+ * Search ALL locally cached notes (nst_content_*) where the CHAPTER TITLE,
+ * SUBJECT NAME, or any blob TITLE contains the query words.
+ * Used for "Title se Compare" on Class 6-12 chapters.
+ */
+export async function searchNotesByTitle(
+  queryWords: string[],
+  maxResults = 30
+): Promise<NoteSearchResult[]> {
+  if (!queryWords.length) return [];
+  const effectiveWords = queryWords.filter(w => w.length >= 2);
+  if (!effectiveWords.length) return [];
+
+  let keys: string[] = [];
+  try {
+    keys = (await storage.keys()).filter(k => k.startsWith('nst_content_'));
+  } catch {
+    return [];
+  }
+
+  const results: NoteSearchResult[] = [];
+
+  for (const key of keys) {
+    const meta = parseKey(key);
+    if (!meta) continue;
+
+    // Normalise chapterId and subjectName for matching (replace - _ with space)
+    const chapterWords = meta.chapterId.replace(/[-_]/g, ' ').toLowerCase();
+    const subjectWords = meta.subjectName.replace(/[-_]/g, ' ').toLowerCase();
+
+    // Check how many query words appear in chapter id / subject name
+    const titleMatchedWords = effectiveWords.filter(w =>
+      chapterWords.includes(w.toLowerCase()) || subjectWords.includes(w.toLowerCase())
+    );
+
+    // Also check blob titles
+    let data: any = null;
+    try { data = await storage.getItem(key); } catch { continue; }
+    if (!data) continue;
+
+    const defaultSubject = meta.subjectName.replace(/-/g, ' ');
+    const blobs = extractTextBlobs(data, defaultSubject);
+
+    // Find blobs whose TITLE contains a query word
+    const blobTitleMatches: { blob: Blob; words: string[] }[] = [];
+    for (const blob of blobs) {
+      const blobTitle = (blob.title || '').toLowerCase();
+      const matched = effectiveWords.filter(w => blobTitle.includes(w.toLowerCase()));
+      if (matched.length > 0) {
+        blobTitleMatches.push({ blob, words: matched });
+      }
+    }
+
+    // Combine: chapter-level title match OR any blob title match
+    const allMatchedWords = Array.from(new Set([
+      ...titleMatchedWords,
+      ...blobTitleMatches.flatMap(b => b.words),
+    ]));
+    if (allMatchedWords.length === 0) continue;
+
+    // Pick best blob: prefer blob title match; fall back to first blob
+    const bestEntry = blobTitleMatches.length > 0
+      ? blobTitleMatches.sort((a, b) => b.words.length - a.words.length)[0]
+      : { blob: blobs[0], words: titleMatchedWords };
+
+    const best = bestEntry.blob;
+    const fullText = best.text;
+    const snippet = fullText.substring(0, 150);
+
+    results.push({
+      storageKey: key,
+      chapterId: meta.chapterId,
+      subjectName: defaultSubject,
+      board: meta.board,
+      classLevel: meta.classLevel,
+      noteTitle: best.title || defaultSubject,
+      noteContent: snippet,
+      noteFullContent: fullText,
+      matchCount: allMatchedWords.length,
+      matchedWords: allMatchedWords,
+      chapterTitleFromKey: meta.chapterId,
+      bookName: best.bookName || defaultSubject,
+      pageNo: best.pageNo,
+    });
+  }
+
+  results.sort((a, b) => b.matchCount - a.matchCount || b.noteFullContent.length - a.noteFullContent.length);
+  return results.slice(0, maxResults);
+}
+
+export interface PageBlob {
+  title: string;
+  text: string;
+  bookName: string;
+  pageNo?: string;
+  matchCount: number;
+}
+
+/**
+ * Load ALL pages/blobs from a single storage key (for Compare-by-Page mode).
+ * Optionally ranks each page by how many query words it contains.
+ */
+export async function loadAllPagesFromKey(
+  storageKey: string,
+  queryWords: string[] = []
+): Promise<PageBlob[]> {
+  let data: any = null;
+  try { data = await storage.getItem(storageKey); } catch { return []; }
+  if (!data) return [];
+
+  const meta = parseKey(storageKey);
+  const defaultSubject = meta ? meta.subjectName.replace(/-/g, ' ') : '';
+  const blobs = extractTextBlobs(data, defaultSubject);
+
+  return blobs.map(b => {
+    const { count } = queryWords.length
+      ? countMatches((b.title + ' ' + b.text).toLowerCase(), queryWords)
+      : { count: 0 };
+    return {
+      title: b.title,
+      text: b.text,
+      bookName: b.bookName || defaultSubject,
+      pageNo: b.pageNo,
+      matchCount: count,
+    };
+  }).sort((a, b) => b.matchCount - a.matchCount);
 }

@@ -123,6 +123,20 @@ export const recordNoteUnstar = async (
 };
 
 /**
+ * Admin-only: permanently delete a trending note entry by its hash.
+ * This removes the entire node from note_stars/{hash}, resetting count to 0.
+ */
+export const adminDeleteNoteStarEntry = async (hash: string): Promise<void> => {
+  if (!hash) return;
+  try {
+    await remove(ref(rtdb, `note_stars/${hash}`));
+  } catch (e) {
+    console.warn('adminDeleteNoteStarEntry failed', e);
+    throw e;
+  }
+};
+
+/**
  * Subscribe to the most-saved notes globally. Callback fires with a map of
  * topic-hash -> entry (count, label, noteKey). Limited to top N for
  * performance. Use this map to display social-proof badges and to render the

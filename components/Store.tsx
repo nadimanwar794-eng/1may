@@ -318,56 +318,13 @@ export const Store: React.FC<Props> = ({ user, settings }) => {
               <h2 className="text-4xl font-serif text-white tracking-tight mb-2">Select your plan</h2>
               <p className="text-slate-500 text-sm font-medium">Unlock your full potential today</p>
               
-              {showEventBanner && (
-                  <div className={`mt-6 p-6 rounded-3xl relative overflow-hidden shadow-2xl border-2 animate-in zoom-in duration-300 ${
-                      activeEvent
-                          ? 'bg-gradient-to-br from-amber-500 via-orange-500 to-amber-600 border-amber-300'
-                          : 'bg-gradient-to-br from-slate-800 to-slate-900 border-amber-500/50'
-                  }`}>
-                      {/* Premium Effects */}
-                      <div className="absolute top-0 right-0 w-64 h-64 bg-white/20 rounded-full blur-3xl -mt-10 -mr-10 animate-pulse"></div>
-                      <div className="absolute bottom-0 left-0 w-40 h-40 bg-yellow-300/10 rounded-full blur-2xl -mb-10 -ml-10"></div>
-                      
-                      <div className="relative z-10 flex flex-col gap-4">
-                          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-                              <div className="text-center md:text-left flex-1">
-                                  <div className="inline-flex items-center gap-2 mb-3 bg-black/20 backdrop-blur-sm px-3 py-1 rounded-full border border-white/20 shadow-inner">
-                                      <Sparkles size={14} className={!activeEvent ? "text-amber-400" : "text-white"} />
-                                      <span className={`text-[10px] font-black uppercase tracking-widest ${
-                                          !activeEvent ? 'text-amber-400 animate-pulse' : 'text-white'
-                                      }`}>
-                                          {!activeEvent ? 'PREMIUM ACCESS COMING SOON' : 'EXCLUSIVE PREMIUM OFFER'}
-                                      </span>
-                                  </div>
-                                  <h3 className="text-3xl font-black text-white leading-tight mb-2 drop-shadow-md">
-                                      {!activeEvent
-                                          ? "Special Discount Event"
-                                          : `Get ${event?.discountPercent}% OFF Today`}
-                                  </h3>
-                                  <p className="text-sm text-white/90 font-medium">
-                                      {!activeEvent
-                                          ? "Prepare for the best deals on our premium features."
-                                          : `Upgrade your learning experience instantly.${isSubscribed ? ' (+5% Extra Bonus for You!)' : ''}`}
-                                  </p>
-                              </div>
-
-                              {timeLeft && (
-                                  <div className="bg-white/10 p-4 rounded-2xl backdrop-blur-md border border-white/20 shrink-0 shadow-xl flex flex-col items-center min-w-[140px]">
-                                      <p className="text-[10px] font-black text-amber-100 uppercase mb-2 tracking-[0.2em] flex items-center gap-1">
-                                          <Timer size={12} /> {!activeEvent ? 'Starts In' : 'Offer Ends In'}
-                                      </p>
-                                      <div className="flex items-center gap-2 font-mono text-2xl font-black text-white drop-shadow-md tabular-nums">
-                                          {timeLeft.days > 0 && <div className="flex flex-col items-center"><span className="text-3xl">{timeLeft.days}</span><span className="text-[8px] text-white/70 uppercase">Days</span></div>}
-                                          {timeLeft.days > 0 && <span className="text-white/50 pb-3">:</span>}
-                                          <div className="flex flex-col items-center"><span className="text-3xl">{String(timeLeft.hours).padStart(2, '0')}</span><span className="text-[8px] text-white/70 uppercase">Hrs</span></div>
-                                          <span className="text-white/50 pb-3">:</span>
-                                          <div className="flex flex-col items-center"><span className="text-3xl">{String(timeLeft.minutes).padStart(2, '0')}</span><span className="text-[8px] text-white/70 uppercase">Min</span></div>
-                                          <span className="text-white/50 pb-3">:</span>
-                                          <div className="flex flex-col items-center"><span className="text-3xl">{String(timeLeft.seconds).padStart(2, '0')}</span><span className="text-[8px] text-white/70 uppercase">Sec</span></div>
-                                      </div>
-                                  </div>
-                              )}
-                          </div>
+                      {/* Discount banner removed — discount code mailbox mein aata hai */}
+              {user.storeDiscount && user.storeDiscount > 0 && (
+                  <div className="mt-4 p-4 rounded-2xl bg-gradient-to-r from-rose-900/40 to-pink-900/40 border border-rose-500/40 flex items-center gap-3 animate-in fade-in">
+                      <span className="text-2xl">🎟️</span>
+                      <div>
+                          <p className="text-sm font-black text-rose-300">Personal Discount Active!</p>
+                          <p className="text-xs text-rose-400">{user.storeDiscount}% OFF sabhi plans pe — Redeem code se apply hua</p>
                       </div>
                   </div>
               )}
@@ -424,22 +381,15 @@ export const Store: React.FC<Props> = ({ user, settings }) => {
                   const original = tierType === 'BASIC' ? plan.basicOriginalPrice : plan.ultraOriginalPrice;
                   let price = tierType === 'BASIC' ? plan.basicPrice : plan.ultraPrice;
 
-                  // Apply Event Discount + Renewal Logic
+                  // Apply Discount Logic (Event discount removed — now comes via mailbox coupon code)
                   let discountPercentVal = 0;
 
-                  // 1. Base Event Discount (if active)
-                  if (activeEvent) {
-                      if ((isSubscribed && event?.showToPremiumUsers) || (!isSubscribed && event?.showToFreeUsers)) {
-                          discountPercentVal += (event?.discountPercent || 0);
-                      }
-                  }
-
-                  // 2. Renewal Bonus (5% Extra for active Premium users)
+                  // 1. Renewal Bonus (5% Extra for active Premium users)
                   if (user.isPremium) {
                       discountPercentVal += 5;
                   }
 
-                  // 3. PERSONAL STORE DISCOUNT (Coupon)
+                  // 2. PERSONAL STORE DISCOUNT (Applied via Redeem Code from mailbox)
                   if (user.storeDiscount) {
                       discountPercentVal += user.storeDiscount;
                   }
@@ -478,11 +428,11 @@ export const Store: React.FC<Props> = ({ user, settings }) => {
                               </span>
                               {discountPercentVal > 0 && (
                                   <div className="flex flex-col items-end">
-                                      <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-bold">
+                                      <span className="text-[10px] bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full font-bold border border-amber-500/30">
                                           {discountPercentVal}% OFF
                                       </span>
                                       {hasRenewalBonus && discountPercentVal >= 5 && (
-                                          <span className="text-[8px] text-green-400 font-bold mt-0.5">
+                                          <span className="text-[8px] text-cyan-300 font-bold mt-0.5">
                                               (+5% Premium Bonus)
                                           </span>
                                       )}
@@ -507,14 +457,9 @@ export const Store: React.FC<Props> = ({ user, settings }) => {
           <button
                  onClick={() => {
                      if (!selectedPlan) return;
-                     // Calculate Final Price again to pass to Modal
+                     // Calculate Final Price (event discount removed — via mailbox coupon)
                      let finalPrice = tierType === 'BASIC' ? selectedPlan.basicPrice : selectedPlan.ultraPrice;
                      let discountPercentVal = 0;
-                     if (activeEvent) {
-                         if ((isSubscribed && event?.showToPremiumUsers) || (!isSubscribed && event?.showToFreeUsers)) {
-                             discountPercentVal += (event?.discountPercent || 0);
-                         }
-                     }
                      if (user.isPremium) {
                          discountPercentVal += 5;
                      }
@@ -533,13 +478,17 @@ export const Store: React.FC<Props> = ({ user, settings }) => {
                      // Pass 'finalPrice' explicitly
                      initiatePurchase({ ...selectedPlan, finalPrice: finalPrice });
                  }}
-                 className={`w-full py-4 rounded-full font-bold text-sm tracking-wide shadow-lg transition-all hover:scale-[1.02] active:scale-[0.98] ${
+                 className={`w-full py-4 rounded-2xl font-black text-sm tracking-widest uppercase shadow-xl transition-all hover:scale-[1.02] active:scale-[0.98] relative overflow-hidden group ${
                      tierType === 'BASIC' 
-                        ? 'bg-cyan-500 text-black hover:bg-cyan-400 shadow-cyan-500/20' 
-                        : 'bg-white text-black hover:bg-slate-200 shadow-white/10'
+                        ? 'bg-gradient-to-r from-sky-500 via-cyan-400 to-sky-500 text-white shadow-cyan-500/30' 
+                        : 'bg-gradient-to-r from-slate-100 via-white to-slate-100 text-black shadow-white/10'
                  }`}
              >
-                 Get {tierType === 'BASIC' ? 'Pro' : 'Max'}
+                 <span className="absolute inset-0 bg-white/20 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 skew-x-12 pointer-events-none"></span>
+                 <span className="relative flex items-center justify-center gap-2">
+                     <Sparkles size={14} className={tierType === 'BASIC' ? 'text-white' : 'text-sky-500'} />
+                     Get {tierType === 'BASIC' ? 'Pro' : 'Max'} — Unlock Now
+                 </span>
           </button>
 
 
@@ -553,18 +502,11 @@ export const Store: React.FC<Props> = ({ user, settings }) => {
               <div className="grid grid-cols-3 gap-3">
                   {packages.slice(0, 6).map(pkg => {
                       let finalPrice = pkg.price;
-                      // Apply Discount Logic to Credits too if applicable
+                      // Discount logic (event discount removed — via mailbox coupon)
                       let creditDiscount = 0;
-                      if (activeEvent) {
-                          if ((isSubscribed && event?.showToPremiumUsers) || (!isSubscribed && event?.showToFreeUsers)) {
-                              creditDiscount += (event?.discountPercent || 0);
-                          }
-                      }
-                      // Renewal Bonus for Credits too? (Usually implies Subscription, but let's keep consistent if they are "Subscription User")
                       if (user.isPremium || (user.subscriptionHistory && user.subscriptionHistory.length > 0)) {
                           creditDiscount += 5;
                       }
-
                       if (user.storeDiscount) {
                           creditDiscount += user.storeDiscount;
                       }

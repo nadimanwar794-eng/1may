@@ -1,49 +1,46 @@
 
 import React from 'react';
 import { ClassLevel, Board, SystemSettings, User } from '../types';
-import { GraduationCap, School, Lock, Clock, Trophy } from 'lucide-react';
+import { GraduationCap, School, Lock, Clock, Trophy, Landmark, Building2 } from 'lucide-react';
 
 interface Props {
   selectedBoard: Board | null;
-  allowedClasses?: ClassLevel[]; // Passed from App State
-  syllabusMode?: 'SCHOOL' | 'COMPETITION' | 'BOTH'; // DEPRECATED: Kept for legacy compatibility if needed
+  allowedClasses?: ClassLevel[];
+  syllabusMode?: 'SCHOOL' | 'COMPETITION' | 'BOTH';
   onSelect: (level: ClassLevel) => void;
   onBack: () => void;
-  settings?: SystemSettings; // NEW: To read permissions
-  user?: User | null; // NEW: To check role
+  onBoardSwitch?: (board: Board) => void;
+  settings?: SystemSettings;
+  user?: User | null;
 }
 
 const all_classes: ClassLevel[] = ['6', '7', '8', '9', '10', '11', '12', 'COMPETITION'];
 
-export const ClassSelection: React.FC<Props> = ({ selectedBoard, allowedClasses, onSelect, onBack, settings, user }) => {
+export const ClassSelection: React.FC<Props> = ({ selectedBoard, allowedClasses, onSelect, onBack, onBoardSwitch, settings, user }) => {
   
-  // Determine Allowed Modes based on User Status
   const isPremium = user?.isPremium && user?.subscriptionEndDate && new Date(user?.subscriptionEndDate) > new Date();
   const allowedModes = isPremium 
       ? (settings?.appMode?.allowedModesForPremium || ['SCHOOL', 'COMPETITION'])
       : (settings?.appMode?.allowedModesForFree || ['SCHOOL']);
 
-  // Admins see everything (incl. hidden) so they can preview the impact.
   const isAdminView = user?.role === 'ADMIN';
   const hiddenSet = new Set<string>(isAdminView ? [] : (settings?.hiddenClasses || []));
 
-  // Include any admin-defined custom classes alongside the standard ones.
   const customClasses = (settings?.customClasses || []) as ClassLevel[];
   const baseList: ClassLevel[] = [...all_classes, ...customClasses];
 
-  // Filter visible classes based on allowed modes AND admin-set Visibility (hiddenClasses).
   const classes = baseList.filter(c => {
-      // Hidden by admin → drop from student view entirely.
       if (hiddenSet.has(c as string)) return false;
-      // Always show SCHOOL classes (subject to mode allowance)
       if (c !== 'COMPETITION') return allowedModes.includes('SCHOOL');
-      // Always show COMPETITION (to allow locking visual) unless explicitly hidden above.
       return true;
   });
 
+  const allowedBoards: Board[] = settings?.allowedBoards?.length
+    ? (settings.allowedBoards as Board[])
+    : ['CBSE', 'BSEB'];
+  const switchableBoards = allowedBoards.filter(b => b === 'CBSE' || b === 'BSEB');
+  const showBoardSwitch = switchableBoards.length > 1 && onBoardSwitch && selectedBoard !== 'COMPETITION';
 
-
-  // Auto-Select Competition Level if Board is COMPETITION
   React.useEffect(() => {
       if (selectedBoard === 'COMPETITION') {
           onSelect('COMPETITION');
@@ -59,41 +56,59 @@ export const ClassSelection: React.FC<Props> = ({ selectedBoard, allowedClasses,
   }
 
   const handleClassClick = (cls: ClassLevel) => {
-      // If allowedClasses is defined AND current class is NOT in it, show alert
-      if (allowedClasses && allowedClasses.length > 0 && !allowedClasses.includes(cls)) {
-          // It's locked, UI handles the visual, this is just a backup check
-          return;
-      }
+      if (allowedClasses && allowedClasses.length > 0 && !allowedClasses.includes(cls)) return;
       onSelect(cls);
   };
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex items-center mb-6">
-        <button onClick={onBack} className="text-slate-600 hover:text-slate-800 transition-colors mr-4">
+      <div className="flex items-center mb-4">
+        <button onClick={onBack} className="text-slate-600 hover:text-slate-800 transition-colors mr-4 font-medium">
           &larr; Back
         </button>
-         <span className="text-sm font-semibold text-slate-500 uppercase tracking-widest">{selectedBoard} Board</span>
+        <span className="text-sm font-semibold text-slate-500 uppercase tracking-widest">{selectedBoard} Board</span>
       </div>
 
-      <div className="text-center mb-10">
-        <h2 className="text-3xl font-bold text-slate-800 mb-3">Select Your Class</h2>
+      {/* CBSE / BSEB Board Switch — shown before class grid */}
+      {showBoardSwitch && (
+        <div className="max-w-4xl mx-auto px-4 mb-6">
+          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Board Switch</p>
+          <div className="inline-flex board-switch-container rounded-xl p-1 gap-1">
+            {switchableBoards.map(board => {
+              const isActive = selectedBoard === board;
+              return (
+                <button
+                  key={board}
+                  onClick={() => !isActive && onBoardSwitch!(board)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-black transition-all active:scale-95 ${
+                    isActive
+                      ? board === 'CBSE'
+                        ? 'bg-blue-600 text-white shadow'
+                        : 'bg-orange-500 text-white shadow'
+                      : 'board-inactive-btn'
+                  }`}
+                >
+                  {board === 'CBSE' ? <Landmark size={15} /> : <Building2 size={15} />}
+                  {board}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="text-center mb-8 px-4">
+        <h2 className="text-3xl font-bold text-slate-800 mb-2">Select Your Class</h2>
         <p className="text-slate-600">Choose your grade to explore the syllabus</p>
       </div>
       
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 max-w-4xl mx-auto px-4">
         {classes.map((cls) => {
-            // Check if locked: if allowedClasses exists AND class is NOT in it
             let isLocked = allowedClasses && allowedClasses.length > 0 && !allowedClasses.includes(cls);
-            let lockReason = "Class closed";
 
-            // SPECIAL LOCK: Competition Mode (If not in allowedModes)
             if (cls === 'COMPETITION' && !allowedModes.includes('COMPETITION')) {
                 isLocked = true;
-                lockReason = "Upgrade to Ultra";
             }
-
-
 
             return (
               <button
@@ -106,18 +121,13 @@ export const ClassSelection: React.FC<Props> = ({ selectedBoard, allowedClasses,
                     : 'bg-white border-slate-200 hover:shadow-xl hover:border-blue-500 hover:-translate-y-1'
                 }`}
               >
-                {/* LOCKED OVERLAY */}
                 {isLocked && (
                     <div className="absolute inset-0 bg-white/60 backdrop-blur-[2px] z-20 flex flex-col items-center justify-center text-center p-2 animate-in fade-in">
                         <div className="bg-slate-100 p-3 rounded-full shadow-inner mb-2 border border-slate-200">
                             <Lock size={20} className="text-slate-500" />
                         </div>
-                        <span className="text-xs font-black text-slate-600 uppercase tracking-wider">
-                            {"Coming Soon"}
-                        </span>
-                        <span className="text-[9px] text-slate-500 mt-1 font-medium">
-                            {`Class ${cls} is currently closed.`}
-                        </span>
+                        <span className="text-xs font-black text-slate-600 uppercase tracking-wider">Coming Soon</span>
+                        <span className="text-[9px] text-slate-500 mt-1 font-medium">{`Class ${cls} is currently closed.`}</span>
                     </div>
                 )}
 
@@ -137,7 +147,7 @@ export const ClassSelection: React.FC<Props> = ({ selectedBoard, allowedClasses,
                       {cls === 'COMPETITION' ? 'Competition' : `Class ${cls}`}
                   </h3>
                   <p className={`text-xs sm:text-sm whitespace-nowrap ${isLocked ? 'text-slate-300' : 'text-slate-600 group-hover:text-slate-600'}`}>
-                      {isLocked ? 'Unavailable' : 'View Syllabus \u2192'}
+                      {isLocked ? 'Unavailable' : 'View Syllabus →'}
                   </p>
                 </div>
               </button>

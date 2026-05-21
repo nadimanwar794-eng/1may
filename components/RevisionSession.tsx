@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { User, SystemSettings, MCQItem } from '../types';
-import { X, BookOpen, Zap, CheckCircle, AlertCircle, ChevronRight, Check, RotateCcw, Loader2 } from 'lucide-react';
+import { X, BookOpen, Zap, CheckCircle, AlertCircle, ChevronRight, Check, RotateCcw, Loader2, Volume2, FileText } from 'lucide-react';
 import { getChapterData, saveUserToLive } from '../firebase';
 import { storage } from '../utils/storage';
 import { DEFAULT_SUBJECTS } from '../constants';
 import { addMistakes, removeMistakeByQuestion } from '../utils/mistakeBank';
+import { ChunkedNotesReader } from './ChunkedNotesReader';
 
 interface Props {
     user: User;
@@ -19,6 +20,7 @@ interface Props {
 
 export const RevisionSession: React.FC<Props> = ({ user, settings, chapterId, subTopic, chapterTitle, subjectName, onClose, onUpdateUser }) => {
     const [activeTab, setActiveTab] = useState<'NOTES' | 'MCQ'>('NOTES');
+    const [notesViewMode, setNotesViewMode] = useState<'html' | 'chunk'>('html');
     const [loading, setLoading] = useState(true);
     const [notesContent, setNotesContent] = useState<string | null>(null);
     const [mcqData, setMcqData] = useState<MCQItem[]>([]);
@@ -351,8 +353,35 @@ export const RevisionSession: React.FC<Props> = ({ user, settings, chapterId, su
                         {activeTab === 'NOTES' && (
                             <div className="max-w-3xl mx-auto">
                                 {notesContent ? (
-                                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 prose prose-sm prose-slate max-w-none">
-                                        <div dangerouslySetInnerHTML={{ __html: notesContent }} />
+                                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200">
+                                        {/* View mode toggle */}
+                                        <div className="flex items-center justify-between px-5 pt-4 pb-2 border-b border-slate-100">
+                                            <p className="text-xs font-black text-slate-500 uppercase tracking-widest flex items-center gap-1"><BookOpen size={11} /> Notes</p>
+                                            <button
+                                                onClick={() => setNotesViewMode(m => m === 'html' ? 'chunk' : 'html')}
+                                                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-black transition-all border ${notesViewMode === 'chunk' ? 'bg-amber-500 text-white border-amber-500 shadow-sm' : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'}`}
+                                                title={notesViewMode === 'html' ? 'TTS Reader mein switch karo' : 'Styled Notes mein switch karo'}
+                                            >
+                                                {notesViewMode === 'html' ? <Volume2 size={13} /> : <FileText size={13} />}
+                                            </button>
+                                        </div>
+                                        <div className="p-6 pt-3">
+                                        {notesViewMode === 'chunk' ? (
+                                            <ChunkedNotesReader
+                                                key="revision-session-chunk"
+                                                content={notesContent
+                                                    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                                                    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                                                    .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+                                                    .replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ')
+                                                    .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()}
+                                                topBarLabel={subTopic}
+                                                hideTopBar={false}
+                                                preferChunkMode
+                                            />
+                                        ) : (
+                                            <div dangerouslySetInnerHTML={{ __html: notesContent }} className="prose prose-sm prose-slate max-w-none" />
+                                        )}
                                         
                                         <div className="mt-8 pt-6 border-t border-slate-100 flex justify-center">
                                             {isMcqAvailable ? (
@@ -379,6 +408,7 @@ export const RevisionSession: React.FC<Props> = ({ user, settings, chapterId, su
                                                     MCQ Practice will be unlocked after the required revision interval.
                                                 </div>
                                             )}
+                                        </div>
                                         </div>
                                     </div>
                                 ) : (

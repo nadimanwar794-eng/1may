@@ -93,17 +93,29 @@ export const FloatingActionMenu: React.FC<Props> = ({ settings, user, isFlashSal
         }
     }, [activeTab, isOpen]);
 
-    // Initial Position Fix
+    // Reset position to default corner on resize/rotation so button never goes off-screen
     useEffect(() => {
-        const handleResize = () => {
-            setPosition(p => ({
-                x: Math.min(p.x, window.innerWidth - 80),
-                y: Math.min(p.y, window.innerHeight - 200)
-            }));
+        const doReset = () => {
+            // Wait 300ms after orientationchange so browser updates innerWidth/Height first
+            setTimeout(() => {
+                setPosition({
+                    x: window.innerWidth - 80,
+                    y: window.innerHeight - 200
+                });
+                setIsVisible(true);
+                if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+                if (!isOpen) {
+                    inactivityTimerRef.current = setTimeout(() => setIsVisible(false), 6000);
+                }
+            }, 300);
         };
-        window.addEventListener('resize', handleResize);
-        return () => window.removeEventListener('resize', handleResize);
-    }, []);
+        window.addEventListener('resize', doReset);
+        window.addEventListener('orientationchange', doReset);
+        return () => {
+            window.removeEventListener('resize', doReset);
+            window.removeEventListener('orientationchange', doReset);
+        };
+    }, [isOpen]);
 
 
         // Auto-hide and Swipe-up Logic

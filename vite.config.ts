@@ -114,8 +114,14 @@ export default defineConfig(({ mode }) => {
           }
         })
       ],
+      build: {
+        sourcemap: false,
+      },
       optimizeDeps: {
         include: ['pdfjs-dist'],
+        esbuildOptions: {
+          sourcemap: false,
+        },
       },
       resolve: {
         alias: {

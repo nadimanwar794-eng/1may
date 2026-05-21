@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { BookOpen, HelpCircle, Video, Headphones, BrainCircuit, Bot, WifiOff, Users } from 'lucide-react';
+import { BookOpen, HelpCircle, Video, Headphones, BrainCircuit, Trophy, WifiOff, Users } from 'lucide-react';
 import { APP_VERSION } from '../constants';
 import { getSplashFontById, ensureGoogleFontLoaded } from '../utils/splashFonts';
 
 interface AppLoadingScreenProps {
   onComplete: () => void;
   isPremium?: boolean;
+  subscriptionLevel?: 'FREE' | 'BASIC' | 'ULTRA';
 }
 
 type ThemeVariant = 'black' | 'blue' | 'light';
@@ -57,7 +58,7 @@ const THEME_STYLES: Record<ThemeVariant, {
   },
 };
 
-export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, isPremium = false }) => {
+export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, isPremium = false, subscriptionLevel = 'FREE' }) => {
   const [progress, setProgress] = useState(0);
   const [stepPhase1, setStepPhase1] = useState(-1);
   const [stepPhase2, setStepPhase2] = useState(-1);
@@ -152,10 +153,9 @@ export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, 
   useEffect(() => { appNameRef.current = appName; }, [appName]);
 
   useEffect(() => {
-    const duration = isPremium ? 1000 : 3000;
-    const intervalTime = isPremium ? 33 : 100;
+    const duration = 2000;
+    const intervalTime = 50;
     const steps = duration / intervalTime;
-    // Resume from current progress so reopening after picker doesn't jump back to 0%.
     let currentStep = Math.floor((progress / 100) * steps);
 
     const timer = setInterval(() => {
@@ -188,12 +188,14 @@ export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, 
           window.speechSynthesis.cancel();
           window.speechSynthesis.speak(utterance);
         } catch {}
-        onCompleteRef.current();
+        setTimeout(() => {
+          onCompleteRef.current();
+        }, 300);
       }
     }, intervalTime);
 
     return () => clearInterval(timer);
-  }, [isPremium]);
+  }, []);
 
   const handleLogoTap = () => {
     if (logoTapped) return;
@@ -215,6 +217,8 @@ export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, 
 
   return (
     <div className={`fixed inset-0 z-[9999] flex flex-col items-center justify-center ${t.bg} ${t.text} overflow-hidden w-full mx-auto`}>
+
+
       {/* Animated background gradient */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-20">
         <div className={`absolute top-[-10%] left-[-10%] w-[120%] h-[120%] ${
@@ -231,7 +235,7 @@ export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, 
         <button
           type="button"
           onClick={handleLogoTap}
-          className="mb-12 text-center animate-in slide-in-from-bottom-4 duration-700 fade-in focus:outline-none select-none"
+          className="relative overflow-hidden mb-12 text-center animate-in slide-in-from-bottom-4 duration-700 fade-in focus:outline-none select-none rounded-2xl"
           style={{ WebkitTapHighlightColor: 'transparent' }}
         >
           {splashLogo.enabled && splashLogo.url ? (
@@ -259,12 +263,16 @@ export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, 
           ) : (
             // === Fallback: gradient short-name text (when admin disables logo) ===
             <h1
-              className={`font-black tracking-tight mb-2 uppercase text-center leading-tight transition-transform duration-300 ease-out ${
+              className={`font-black tracking-tight mb-2 uppercase text-center leading-tight transition-transform duration-300 ease-out bg-clip-text text-transparent ${
                 logoTapped ? 'scale-[2.2]' : 'scale-100'
               } ${
-                themeVariant === 'light'
-                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent'
-                  : 'bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent'
+                subscriptionLevel === 'ULTRA'
+                  ? 'bg-gradient-to-r from-slate-400 via-slate-300 to-slate-500'
+                  : subscriptionLevel === 'BASIC'
+                    ? 'bg-gradient-to-r from-blue-500 via-indigo-600 to-blue-700'
+                    : themeVariant === 'light'
+                      ? 'bg-gradient-to-r from-sky-500 to-cyan-600'
+                      : 'bg-gradient-to-r from-sky-400 to-cyan-500'
               }`}
               style={{
                 fontSize: `${appNameSize}px`,
@@ -278,6 +286,7 @@ export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, 
           <p className={`text-xs font-bold tracking-widest ${t.subtext} uppercase mt-2 transition-opacity duration-300 ${logoTapped ? 'opacity-0' : 'opacity-100'}`}>
             Loading your experience...
           </p>
+
         </button>
 
         {/* Feature boxes */}
@@ -309,8 +318,8 @@ export const AppLoadingScreen: React.FC<AppLoadingScreenProps> = ({ onComplete, 
               <span className={`font-bold tracking-wide text-center leading-tight ${t.text}`}>Smart<br />Revision</span>
             </div>
             <div className={`flex flex-col items-center justify-center p-6 rounded-2xl ${t.boxBg} border ${t.boxBorder} shadow-lg transition-all duration-500 transform ${stepPhase2 >= 1 ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-8 scale-95'}`}>
-              <Bot size={32} className={`${iconColor6} mb-3`} />
-              <span className={`font-bold tracking-wide ${t.text}`}>AI Hub</span>
+              <Trophy size={32} className={`${iconColor6} mb-3`} />
+              <span className={`font-bold tracking-wide text-center leading-tight ${t.text}`}>Daily<br />Quiz</span>
             </div>
             <div className={`flex flex-col items-center justify-center p-6 rounded-2xl ${t.boxBg} border ${t.boxBorder} shadow-lg transition-all duration-500 transform ${stepPhase2 >= 2 ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-8 scale-95'}`}>
               <WifiOff size={32} className={`${iconColor7} mb-3`} />

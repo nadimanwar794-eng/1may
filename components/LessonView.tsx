@@ -1,8 +1,9 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import { LessonContent, Subject, ClassLevel, Chapter, MCQItem, ContentType, User, SystemSettings } from '../types';
-import { ArrowLeft, Clock, AlertTriangle, ExternalLink, CheckCircle, XCircle, Trophy, BookOpen, Play, Lock, ChevronRight, ChevronLeft, Save, X, Maximize, Volume2, Square, Zap, StopCircle, Globe, Lightbulb, FileText, BrainCircuit, Grip, CheckSquare, List, Download, BarChart3 } from 'lucide-react';
+import { ArrowLeft, Clock, AlertTriangle, ExternalLink, CheckCircle, XCircle, Trophy, BookOpen, Play, Lock, ChevronRight, ChevronLeft, Save, X, Maximize, Volume2, Square, Zap, StopCircle, Globe, Lightbulb, FileText, BrainCircuit, Grip, CheckSquare, List, Download, BarChart3, RotateCcw, Monitor } from 'lucide-react';
 import { CustomConfirm, CustomAlert } from './CustomDialogs';
 import { CustomPlayer } from './CustomPlayer';
 import remarkMath from 'remark-math';
@@ -21,6 +22,7 @@ import html2canvas from 'html2canvas';
 import { DownloadOptionsModal } from './DownloadOptionsModal';
 import { downloadAsMHTML } from '../utils/downloadUtils';
 import { saveOfflineItem } from '../utils/offlineStorage';
+import { rotateScreen, isDesktopModeOn, setDesktopMode } from '../utils/displayPrefs';
 
 
 interface Props {
@@ -39,6 +41,7 @@ interface Props {
   onToggleAutoTts?: (enabled: boolean) => void;
   instantExplanation?: boolean; // NEW: Instant Feedback Mode
   onShowMarksheet?: (result?: any) => void; // NEW: Marksheet Trigger
+  onImmersiveChange?: (isImmersive: boolean) => void;
 }
 
 export const LessonView: React.FC<Props> = ({ 
@@ -56,7 +59,8 @@ export const LessonView: React.FC<Props> = ({
   onLaunchContent,
   onToggleAutoTts,
   instantExplanation = false, // Default to standard mode
-  onShowMarksheet
+  onShowMarksheet,
+  onImmersiveChange
 }) => {
   const [mcqState, setMcqState] = useState<Record<number, number | null>>({});
   const [revealedAnswers, setRevealedAnswers] = useState<Set<number>>(new Set());
@@ -67,9 +71,75 @@ export const LessonView: React.FC<Props> = ({
   const [analysisUnlocked, setAnalysisUnlocked] = useState(false);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [language, setLanguage] = useState<'English' | 'Hindi'>('English');
+  const [notesViewMode, setNotesViewMode] = useState<'readable' | 'styled'>('readable');
+  const [isLandscape, setIsLandscape] = useState<boolean>(() => {
+    try { return window.matchMedia('(orientation: landscape)').matches; } catch { return false; }
+  });
+  const [viewingNoteChunkMode, setViewingNoteChunkMode] = useState(false);
+  const [showModeUnlockAlert, setShowModeUnlockAlert] = useState(false);
+  const [htmlUnlocked, setHtmlUnlocked] = useState<boolean>(() => {
+    try {
+      const key = `nst_html_unlock_${content?.id || content?.title || 'note'}`;
+      return localStorage.getItem(key) === '1';
+    } catch { return false; }
+  });
   const [universalNotes, setUniversalNotes] = useState<any[]>([]);
   const [recLoading, setRecLoading] = useState(false);
   const [viewingNote, setViewingNote] = useState<any>(null); // New state for HTML Note Modal
+  const [isDesktopMode, setIsDesktopMode] = useState<boolean>(isDesktopModeOn);
+  const [rotateToast, setRotateToast] = useState<string | null>(null);
+  const [isImmersive, setIsImmersive] = useState(false);
+  useEffect(() => {
+    if (onImmersiveChange) onImmersiveChange(isImmersive);
+  }, [isImmersive]);
+
+  // On mount: always re-apply stored desktop mode preference to the viewport
+  useEffect(() => {
+    const current = isDesktopModeOn();
+    setDesktopMode(current);
+    setIsDesktopMode(current);
+  }, []);
+
+  // Re-apply desktop mode whenever orientation changes (manual or programmatic rotation)
+  useEffect(() => {
+    const reapply = () => {
+      // Wait for browser to settle after rotation then re-apply viewport
+      setTimeout(() => {
+        const current = isDesktopModeOn();
+        setDesktopMode(current);
+        setIsDesktopMode(current);
+      }, 400);
+    };
+    window.addEventListener('orientationchange', reapply);
+    window.addEventListener('resize', reapply);
+    return () => {
+      window.removeEventListener('orientationchange', reapply);
+      window.removeEventListener('resize', reapply);
+    };
+  }, []);
+
+  const handleRotate = async () => {
+    const desktopWasOn = isDesktopModeOn();
+    const result = await rotateScreen();
+    if (!result) {
+      setRotateToast('Is device mein screen rotation supported nahi hai');
+      setTimeout(() => setRotateToast(null), 2500);
+    } else {
+      // Re-apply desktop mode after rotation settles (rotation can reset viewport)
+      setTimeout(() => {
+        if (desktopWasOn) {
+          setDesktopMode(true);
+          setIsDesktopMode(true);
+        }
+      }, 500);
+    }
+  };
+
+  const toggleDesktopMode = () => {
+    const newVal = !isDesktopMode;
+    setDesktopMode(newVal);
+    setIsDesktopMode(newVal);
+  };
 
   const [showQuestionDrawer, setShowQuestionDrawer] = useState(false);
   const [showTopicSidebar, setShowTopicSidebar] = useState(false);
@@ -111,6 +181,16 @@ export const LessonView: React.FC<Props> = ({
           setAutoReadEnabled(true);
       }
   }, [settings?.isAutoTtsEnabled, instantExplanation]);
+
+  // LANDSCAPE DETECTION
+  useEffect(() => {
+    try {
+      const mq = window.matchMedia('(orientation: landscape)');
+      const handler = (e: MediaQueryListEvent) => setIsLandscape(e.matches);
+      mq.addEventListener('change', handler);
+      return () => mq.removeEventListener('change', handler);
+    } catch {}
+  }, []);
 
   // LANGUAGE AUTO-SELECT
   useEffect(() => {
@@ -234,6 +314,38 @@ export const LessonView: React.FC<Props> = ({
   // SCHOOL MODE FREE NOTES FIX
   const isFree = content.type === 'PDF_FREE' || content.type === 'NOTES_HTML_FREE' || (content.type === 'VIDEO_LECTURE' && content.videoPlaylist?.some(v => v.access === 'FREE'));
   
+  // FLOATING IMMERSIVE BUTTON — always rendered via portal into document.body
+  // so it escapes any fixed/overflow parent stacking context.
+  const floatingBtn = createPortal(
+    <button
+      onClick={() => setIsImmersive(v => !v)}
+      className="shadow-2xl flex items-center justify-center"
+      style={{
+        position: 'fixed',
+        bottom: isImmersive ? '16px' : '80px',
+        right: '16px',
+        width: '52px',
+        height: '52px',
+        borderRadius: '50%',
+        background: isImmersive ? 'rgba(30,27,75,0.95)' : 'rgba(15,23,42,0.88)',
+        border: isImmersive ? '2.5px solid rgba(99,102,241,0.9)' : '2.5px solid rgba(255,255,255,0.5)',
+        backdropFilter: 'blur(10px)',
+        zIndex: 9200,
+      }}
+      title={isImmersive ? 'UI wapas laao' : 'Focus Mode — UI chhupao'}
+    >
+      {settings?.appLogo ? (
+        <img src={settings.appLogo} alt="App" style={{ width: '38px', height: '38px', objectFit: 'contain', borderRadius: '50%', pointerEvents: 'none' }} />
+      ) : (
+        <span style={{ fontSize: '18px', fontWeight: 900, color: '#fff', pointerEvents: 'none' }}>
+          {(settings?.appShortName || settings?.appName || 'A').charAt(0)}
+        </span>
+      )}
+      <span style={{ position: 'absolute', top: '3px', right: '3px', width: '10px', height: '10px', borderRadius: '50%', background: isImmersive ? '#6366f1' : '#22c55e', border: '2px solid #fff', pointerEvents: 'none' }} />
+    </button>,
+    document.body
+  );
+
   // FREE HTML NOTE MODAL
   if (viewingNote) {
       return (
@@ -248,8 +360,14 @@ export const LessonView: React.FC<Props> = ({
                       </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <SpeakButton text={viewingNote.content} className="p-2 bg-orange-50 text-orange-600 hover:bg-orange-100" />
-                    <button onClick={() => setViewingNote(null)} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200"><X size={20}/></button>
+                    <button
+                      onClick={() => setViewingNoteChunkMode(m => !m)}
+                      className={`p-2 rounded-full transition-colors ${viewingNoteChunkMode ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                      title={viewingNoteChunkMode ? 'HTML Mode' : 'TTS Reader'}
+                    >
+                      <Volume2 size={18} />
+                    </button>
+                    <button onClick={() => { setViewingNote(null); setViewingNoteChunkMode(false); }} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200"><X size={20}/></button>
                   </div>
               </header>
 
@@ -257,10 +375,25 @@ export const LessonView: React.FC<Props> = ({
               <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-6 bg-slate-50">
                   <div className="w-full mx-auto bg-white p-6 rounded-3xl shadow-sm border border-slate-100 min-h-[50vh]">
                       <h1 className="text-2xl font-black text-slate-900 mb-6 border-b pb-4">{viewingNote.title}</h1>
-                      <div
-                          className="notes-html-content"
-                          dangerouslySetInnerHTML={{ __html: decodeHtml(viewingNote.content) }}
-                      />
+                      {viewingNoteChunkMode ? (
+                          <ChunkedNotesReader
+                              key={`viewing-note-chunk-${viewingNote.title}`}
+                              content={decodeHtml(viewingNote.content)
+                                  .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                                  .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                                  .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+                                  .replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ')
+                                  .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()}
+                              topBarLabel={viewingNote.title}
+                              preferChunkMode
+                              hideTopBar={false}
+                          />
+                      ) : (
+                          <div
+                              className="notes-html-content"
+                              dangerouslySetInnerHTML={{ __html: decodeHtml(viewingNote.content) }}
+                          />
+                      )}
                   </div>
               </div>
 
@@ -274,45 +407,293 @@ export const LessonView: React.FC<Props> = ({
       if (isHtml) {
           const htmlToRender = content.aiHtmlContent || content.content;
           const decodedContent = decodeHtml(htmlToRender);
-          return (
-              <div className="fixed inset-0 z-50 bg-white flex flex-col animate-in fade-in">
-                  <header className="bg-white/95 backdrop-blur-md text-slate-800 p-4 absolute top-0 left-0 right-0 z-10 flex items-center justify-between border-b border-slate-100 shadow-sm">
-                      <div className="flex items-center gap-3"><button onClick={toggleFullScreen} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200" title="Toggle Fullscreen"><Maximize size={20} /></button>
-                          <button onClick={onBack} className="p-2 bg-slate-100 rounded-full"><ArrowLeft size={20} /></button>
-                          <div>
-                              <h2 className="text-sm font-bold">{content.title}</h2>
-                              <p className="text-[10px] text-teal-600 font-bold uppercase tracking-widest">Digital Notes</p>
+          const strippedContent = decodedContent
+              .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+              .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+              .replace(/<[^>]*>/g, ' ')
+              .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+              .replace(/\s+/g, ' ').trim();
+
+          const isPremiumUser = !!(user?.isPremium || (user?.subscriptionTier && user.subscriptionTier !== 'FREE'));
+          const HTML_UNLOCK_COST = 10;
+          const htmlUnlockKey = `nst_html_unlock_${content?.id || content?.title || 'note'}`;
+
+          const handleNotesMakerDownload = async () => {
+              // Ensure desktop mode is on for the download (full-width render)
+              const wasDesktop = isDesktopModeOn();
+              if (!wasDesktop) { setDesktopMode(true); setIsDesktopMode(true); }
+              await new Promise(r => setTimeout(r, 300));
+              await downloadAsMHTML('notes-maker-printable', `${content.title}_Notes`, {
+                  appName: 'IIC',
+                  pageTitle: content.title,
+                  subtitle: chapter?.subject || 'Notes',
+              });
+              if (!wasDesktop) { setDesktopMode(false); setIsDesktopMode(false); }
+          };
+
+          const handleModeToggle = (targetMode: 'readable' | 'styled') => {
+              if (targetMode === notesViewMode) return;
+              // Sync desktop mode state from localStorage before switching modes
+              const currentDesktop = isDesktopModeOn();
+              setIsDesktopMode(currentDesktop);
+              setDesktopMode(currentDesktop);
+              if (targetMode === 'styled') {
+                  // HTML Notes — premium free, free users need 10 credits (lifetime per note)
+                  if (isPremiumUser || htmlUnlocked) {
+                      setNotesViewMode('styled');
+                  } else {
+                      if (!user || !onUpdateUser) {
+                          setAlertConfig({ isOpen: true, message: `HTML Notes unlock karne ke liye ${HTML_UNLOCK_COST} coins chahiye.` });
+                          return;
+                      }
+                      if ((user.credits || 0) < HTML_UNLOCK_COST) {
+                          setAlertConfig({ isOpen: true, message: `HTML Notes unlock karne ke liye ${HTML_UNLOCK_COST} coins chahiye. Aapke paas sirf ${user.credits || 0} coins hain.` });
+                          return;
+                      }
+                      const updatedUser = { ...user, credits: (user.credits || 0) - HTML_UNLOCK_COST };
+                      onUpdateUser(updatedUser);
+                      saveUserToLive(updatedUser);
+                      try { localStorage.setItem(htmlUnlockKey, '1'); } catch {}
+                      setHtmlUnlocked(true);
+                      setNotesViewMode('styled');
+                  }
+              } else {
+                  // TTS Reader — always free
+                  setNotesViewMode('readable');
+              }
+          };
+
+          // Strip leading title heading from HTML to avoid showing title twice
+          const deduplicatedHtml = decodedContent.replace(/^(\s*<(div|section)[^>]*>\s*)?<h[12][^>]*>[^<]*<\/h[12]>/i, '');
+
+          // Mode switcher panel (shared for both portrait and landscape)
+          const modeSwitcher = (
+              <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-1">
+                      <div className="flex items-center bg-slate-200 rounded-2xl p-1 gap-1 shadow-inner flex-1">
+                          <button
+                              onClick={() => handleModeToggle('readable')}
+                              className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-black uppercase tracking-wide transition-all duration-200 ${
+                                  notesViewMode === 'readable'
+                                      ? 'bg-white text-indigo-700 shadow-md'
+                                      : 'text-slate-500 hover:text-slate-700'
+                              }`}
+                          >
+                              <Volume2 size={14} />
+                              TTS Reader
+                          </button>
+                          <button
+                              onClick={() => handleModeToggle('styled')}
+                              className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-black uppercase tracking-wide transition-all duration-200 ${
+                                  notesViewMode === 'styled'
+                                      ? 'bg-white text-teal-700 shadow-md'
+                                      : 'text-slate-500 hover:text-slate-700'
+                              }`}
+                          >
+                              <FileText size={14} />
+                              Notes Maker
+                              {!isPremiumUser && !htmlUnlocked && (
+                                  <span className="text-[9px] bg-amber-500 text-white rounded-full px-1.5 py-0.5 font-black leading-none">
+                                      {HTML_UNLOCK_COST}🪙
+                                  </span>
+                              )}
+                          </button>
+                      </div>
+                      {/* Rotate button — accessible in both read and write modes */}
+                      <button
+                          onClick={handleRotate}
+                          className="p-2.5 bg-slate-200 hover:bg-slate-300 rounded-2xl text-slate-600 transition-colors flex-shrink-0"
+                          title="Screen Rotate"
+                      >
+                          <RotateCcw size={15} />
+                      </button>
+                  </div>
+                  {isLandscape && (
+                      <div className="text-[10px] text-slate-400 text-center mt-1">
+                          {notesViewMode === 'readable' ? 'TTS Reader' : 'Notes Maker'} mode
+                      </div>
+                  )}
+              </div>
+          );
+
+          // Notes content panel (shared for both portrait and landscape)
+          const notesContent = (
+              <>
+                  {notesViewMode === 'readable' ? (
+                      <ChunkedNotesReader
+                          content={strippedContent}
+                          language={language === 'Hindi' ? 'hi-IN' : 'en-US'}
+                          topBarLabel={content.title}
+                          className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-100 mt-2"
+                          noteKey={noteKey}
+                          isStarred={isTopicStarred}
+                          onStarToggle={toggleTopicStar}
+                          preferChunkMode
+                          hideTopBar={isImmersive}
+                          onDesktopModeChange={setIsDesktopMode}
+                      />
+                  ) : (
+                      <>
+                      {/* Notes Maker top bar — label, download, exit */}
+                      <div className="flex items-center justify-between px-1 py-1 mb-1">
+                          <span className="text-[10px] font-black text-teal-600 uppercase tracking-widest flex items-center gap-1">
+                              <FileText size={11} /> Notes Maker
+                          </span>
+                          <div className="flex items-center gap-2">
+                              <button
+                                  onClick={handleNotesMakerDownload}
+                                  className="flex items-center gap-1 text-[10px] font-black text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200 hover:bg-emerald-100 active:scale-95 transition-all"
+                              >
+                                  <Download size={10} /> Save
+                              </button>
+                              <button
+                                  onClick={() => handleModeToggle('readable')}
+                                  className="flex items-center gap-1 text-[10px] font-black text-slate-500 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200 hover:bg-slate-200 active:scale-95 transition-all"
+                              >
+                                  <X size={10} /> Exit
+                              </button>
                           </div>
                       </div>
+                      {/* Printable container: wraps all Notes Maker HTML for download */}
+                      <div id="notes-maker-printable">
+                      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden mt-2">
+                          <div
+                              className="notes-html-content p-4 sm:p-6"
+                              dangerouslySetInnerHTML={{ __html: deduplicatedHtml }}
+                              style={{ fontSize: '15px', lineHeight: '1.8' }}
+                          />
+                      </div>
+                      {/* MULTI-HTML SECTIONS: Additional HTML blocks on same page */}
+                      {(() => {
+                          const sections = (content as any).schoolHtmlSections || (content as any).competitionHtmlSections || (content as any).htmlSections;
+                          if (!sections || sections.length === 0) return null;
+                          return sections.map((sec: { id: string; title?: string; html: string }, idx: number) => (
+                              <div key={sec.id || idx} className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden mt-3">
+                                  {sec.title && (
+                                      <div className="px-4 pt-4 pb-1">
+                                          <h3 className="text-sm font-black text-slate-700 flex items-center gap-2">
+                                              <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 text-[10px] font-black flex items-center justify-center">{idx + 1}</span>
+                                              {sec.title}
+                                          </h3>
+                                          <div className="h-px bg-slate-100 mt-2" />
+                                      </div>
+                                  )}
+                                  <div
+                                      className="notes-html-content p-4 sm:p-6"
+                                      dangerouslySetInnerHTML={{ __html: sec.html || '' }}
+                                      style={{ fontSize: '15px', lineHeight: '1.8' }}
+                                  />
+                              </div>
+                          ));
+                      })()}
+                      </div>
+                      </>
+                  )}
+                  {isStreaming && (
+                      <div className="flex items-center gap-2 text-slate-600 mt-4 animate-pulse pb-4">
+                          <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+                          <span className="text-xs font-bold">AI writing...</span>
+                      </div>
+                  )}
+              </>
+          );
+
+          return (
+              <div className="fixed inset-0 z-50 bg-white flex flex-col animate-in fade-in">
+                  {/* Rotate toast */}
+                  {rotateToast && (
+                      <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[9999] bg-slate-800 text-white text-xs font-bold px-4 py-2 rounded-xl shadow-lg animate-in fade-in">
+                          {rotateToast}
+                      </div>
+                  )}
+                  {/* Header */}
+                  <header className={`bg-white/95 backdrop-blur-md text-slate-800 px-4 py-3 flex-shrink-0 z-10 flex items-center justify-between border-b border-slate-100 shadow-sm${isImmersive ? ' hidden' : ''}`}>
+                      <div className="flex items-center gap-3">
+                          <button onClick={toggleFullScreen} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200" title="Toggle Fullscreen"><Maximize size={20} /></button>
+                          <button onClick={onBack} className="p-2 bg-slate-100 rounded-full"><ArrowLeft size={20} /></button>
+                          <h2 className="text-sm font-bold truncate max-w-[120px]">{content.title}</h2>
+                      </div>
                       <div className="flex items-center gap-2">
-                          <button 
-                              onClick={() => setLanguage(l => l === 'English' ? 'Hindi' : 'English')}
-                              className="px-3 py-1.5 bg-slate-100 rounded-lg text-xs font-bold text-slate-600 hover:bg-slate-200 border border-slate-200 mr-1 flex items-center gap-1 transition-all"
+                          <button
+                              onClick={handleRotate}
+                              className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200 transition-colors"
+                              title="Screen Rotate"
                           >
-                              <Globe size={14} /> {language === 'English' ? 'Hindi (हिंदी)' : 'English'}
+                              <RotateCcw size={18} />
+                          </button>
+                          <button
+                              onClick={toggleDesktopMode}
+                              className={`p-2 rounded-full transition-colors ${isDesktopMode ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                              title={isDesktopMode ? 'Desktop Mode ON' : 'Desktop Mode OFF'}
+                          >
+                              <Monitor size={18} />
+                          </button>
+                          <button
+                              onClick={() => setLanguage(l => l === 'English' ? 'Hindi' : 'English')}
+                              className="px-3 py-1.5 bg-slate-100 rounded-lg text-xs font-bold text-slate-600 hover:bg-slate-200 border border-slate-200 flex items-center gap-1 transition-all"
+                          >
+                              <Globe size={14} /> {language === 'English' ? 'हिंदी' : 'Eng'}
                           </button>
                           <button onClick={onBack} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200 transition-colors"><X size={20} /></button>
                       </div>
                   </header>
-                  <div className="flex-1 overflow-y-auto w-full pt-16 pb-6 bg-slate-50">
-                      <div className="w-full max-w-5xl mx-auto px-4 md:px-8">
-                          <ChunkedNotesReader
-                              content={decodedContent}
-                              language={language === 'Hindi' ? 'hi-IN' : 'en-US'}
-                              topBarLabel={content.title}
-                              className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-100"
-                              noteKey={noteKey}
-                              isStarred={isTopicStarred}
-                              onStarToggle={toggleTopicStar}
-                          />
-                          {isStreaming && (
-                            <div className="flex items-center gap-2 text-slate-600 mt-4 animate-pulse pb-4">
-                                <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
-                                <span className="text-xs font-bold">AI writing...</span>
-                            </div>
-                          )}
+
+                  {isLandscape ? (
+                      /* ── LANDSCAPE: Split screen — controls left, notes right ── */
+                      <div className="flex-1 flex flex-row overflow-hidden bg-slate-50">
+                          {/* Left panel: mode switcher controls */}
+                          <div className={`w-[220px] flex-shrink-0 bg-white border-r border-slate-100 flex flex-col p-4 gap-3 overflow-y-auto${isImmersive ? ' hidden' : ''}`}>
+                              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Reading Mode</p>
+                              {modeSwitcher}
+                              {/* Language toggle */}
+                              <div className="mt-2">
+                                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Language</p>
+                                  <button
+                                      onClick={() => setLanguage(l => l === 'English' ? 'Hindi' : 'English')}
+                                      className="w-full px-3 py-2 bg-slate-100 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200 border border-slate-200 flex items-center justify-center gap-1 transition-all"
+                                  >
+                                      <Globe size={14} /> {language === 'English' ? 'हिंदी में बदलें' : 'Switch to English'}
+                                  </button>
+                              </div>
+                              {/* Rotate & Desktop Mode */}
+                              <div className="mt-1">
+                                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Screen</p>
+                                  <div className="flex gap-2">
+                                      <button
+                                          onClick={handleRotate}
+                                          className="flex-1 flex items-center justify-center gap-1 py-2 bg-slate-100 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200 border border-slate-200 transition-all"
+                                          title="Screen Rotate"
+                                      >
+                                          <RotateCcw size={14} /> Rotate
+                                      </button>
+                                      <button
+                                          onClick={toggleDesktopMode}
+                                          className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-xl text-xs font-bold border transition-all ${isDesktopMode ? 'bg-indigo-100 text-indigo-600 border-indigo-200' : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'}`}
+                                          title={isDesktopMode ? 'Desktop Mode ON' : 'Desktop Mode'}
+                                      >
+                                          <Monitor size={14} /> {isDesktopMode ? 'Desktop' : 'Desktop'}
+                                      </button>
+                                  </div>
+                              </div>
+                          </div>
+                          {/* Right panel: notes content */}
+                          <div className="flex-1 overflow-y-auto px-4 py-3 min-w-0">
+                              {notesContent}
+                          </div>
                       </div>
-                  </div>
+                  ) : (
+                      /* ── PORTRAIT: Normal single-column layout ── */
+                      <div className="flex-1 overflow-y-auto w-full pb-6 bg-slate-50">
+                          <div className="w-full max-w-5xl mx-auto px-4 md:px-8">
+                              {/* Mode switcher tab bar */}
+                              <div className={`sticky top-0 z-20 bg-slate-50 pt-3 pb-2${isImmersive ? ' hidden' : ''}`}>
+                                  {modeSwitcher}
+                              </div>
+                              {notesContent}
+                          </div>
+                      </div>
+                  )}
+              {floatingBtn}
               </div>
           );
       }
@@ -320,7 +701,7 @@ export const LessonView: React.FC<Props> = ({
       if (isImage) {
           return (
               <div className="fixed inset-0 z-50 bg-[#111] flex flex-col animate-in fade-in">
-                  <header className="bg-black/90 backdrop-blur-md text-white p-4 absolute top-0 left-0 right-0 z-10 flex items-center justify-between border-b border-white/10">
+                  <header className={`bg-black/90 backdrop-blur-md text-white p-4 absolute top-0 left-0 right-0 z-10 flex items-center justify-between border-b border-white/10${isImmersive ? ' hidden' : ''}`}>
                       <div className="flex items-center gap-3"><button onClick={toggleFullScreen} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200" title="Toggle Fullscreen"><Maximize size={20} /></button>
                           <button onClick={onBack} className="p-2 bg-white/10 rounded-full"><ArrowLeft size={20} /></button>
                           <div>
@@ -333,6 +714,7 @@ export const LessonView: React.FC<Props> = ({
                   <div className="flex-1 overflow-y-auto pt-16 flex items-start justify-center" onContextMenu={preventMenu}>
                       <img src={content.content} alt="Notes" className="w-full h-auto object-contain" draggable={false} />
                   </div>
+              {floatingBtn}
               </div>
           );
       }
@@ -346,7 +728,7 @@ export const LessonView: React.FC<Props> = ({
       if (isGoogleDriveAudio) {
           return (
               <div className="fixed inset-0 z-50 bg-slate-900 flex flex-col animate-in fade-in">
-                  <header className="bg-slate-900/90 backdrop-blur-md text-white p-4 flex items-center justify-between border-b border-white/10 z-20">
+                  <header className={`bg-slate-900/90 backdrop-blur-md text-white p-4 flex items-center justify-between border-b border-white/10 z-20${isImmersive ? ' hidden' : ''}`}>
                       <div className="flex items-center gap-3"><button onClick={toggleFullScreen} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200" title="Toggle Fullscreen"><Maximize size={20} /></button>
                           <button onClick={onBack} className="p-2 bg-white/10 rounded-full hover:bg-white/20 transition-colors"><ArrowLeft size={20} /></button>
                           <div>
@@ -365,13 +747,14 @@ export const LessonView: React.FC<Props> = ({
                           <CustomPlayer videoUrl={contentValue} />
                       </div>
                   </div>
+              {floatingBtn}
               </div>
           );
       }
 
       return (
           <div className="fixed inset-0 z-50 bg-white flex flex-col animate-in fade-in">
-              <header className="bg-white border-b p-4 flex items-center justify-between">
+              <header className={`bg-white border-b p-4 flex items-center justify-between${isImmersive ? ' hidden' : ''}`}>
                   <div className="flex items-center gap-3"><button onClick={toggleFullScreen} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200" title="Toggle Fullscreen"><Maximize size={20} /></button>
                       <button onClick={onBack} className="p-2 bg-slate-100 rounded-full"><ArrowLeft size={20} /></button>
                       <h2 className="font-bold truncate">{content.title}</h2>
@@ -391,6 +774,7 @@ export const LessonView: React.FC<Props> = ({
                       allowFullScreen
                   />
               </div>
+          {floatingBtn}
           </div>
       );
   }
@@ -399,12 +783,31 @@ export const LessonView: React.FC<Props> = ({
   if (content.content || isStreaming) {
       return (
           <div className="flex flex-col h-full bg-white animate-in fade-in">
-              <header className="bg-white border-b p-4 flex items-center justify-between sticky top-0 z-10">
+              {rotateToast && (
+                  <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[9999] bg-slate-800 text-white text-xs font-bold px-4 py-2 rounded-xl shadow-lg animate-in fade-in">
+                      {rotateToast}
+                  </div>
+              )}
+              <header className={`bg-white border-b p-4 flex items-center justify-between sticky top-0 z-10${isImmersive ? ' hidden' : ''}`}>
                   <div className="flex items-center gap-3"><button onClick={toggleFullScreen} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200" title="Toggle Fullscreen"><Maximize size={20} /></button>
                       <button onClick={onBack} className="p-2 bg-slate-100 rounded-full"><ArrowLeft size={20} /></button>
-                      <h2 className="font-bold">{content.title}</h2>
+                      <h2 className="font-bold truncate max-w-[140px]">{content.title}</h2>
                   </div>
                   <div className="flex items-center gap-2">
+                      <button
+                          onClick={handleRotate}
+                          className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200 transition-colors"
+                          title="Screen Rotate"
+                      >
+                          <RotateCcw size={18} />
+                      </button>
+                      <button
+                          onClick={toggleDesktopMode}
+                          className={`p-2 rounded-full transition-colors ${isDesktopMode ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                          title={isDesktopMode ? 'Desktop Mode ON' : 'Desktop Mode OFF'}
+                      >
+                          <Monitor size={18} />
+                      </button>
                       <button 
                           onClick={() => setLanguage(l => l === 'English' ? 'Hindi' : 'English')}
                           className="px-3 py-1.5 bg-slate-100 rounded-lg text-xs font-bold text-slate-600 hover:bg-slate-200 border border-slate-200 mr-1 flex items-center gap-1 transition-all"
@@ -423,6 +826,9 @@ export const LessonView: React.FC<Props> = ({
                           noteKey={noteKey}
                           isStarred={isTopicStarred}
                           onStarToggle={toggleTopicStar}
+                          preferChunkMode
+                          hideTopBar={isImmersive}
+                          onDesktopModeChange={setIsDesktopMode}
                       />
                       {isStreaming && (
                         <div className="flex items-center gap-2 text-slate-600 mt-4 animate-pulse">
@@ -432,6 +838,7 @@ export const LessonView: React.FC<Props> = ({
                       )}
                   </div>
               </div>
+          {floatingBtn}
           </div>
       );
   }
@@ -762,6 +1169,13 @@ export const LessonView: React.FC<Props> = ({
         // Allow UI to update (show hidden container if needed, though it's always there but maybe hidden via CSS)
         // We use a timeout to let the UI thread breathe
         setTimeout(async () => {
+            // Temporarily apply desktop mode for download so content renders at full width
+            const wasDesktop = isDesktopModeOn();
+            if (!wasDesktop) setDesktopMode(true);
+
+            // Small extra delay to let viewport change settle
+            await new Promise(r => setTimeout(r, 200));
+
             if (type === 'MHTML') {
                 downloadAsMHTML('printable-analysis-report', `${chapter.title}_Analysis`);
             } else {
@@ -796,6 +1210,9 @@ export const LessonView: React.FC<Props> = ({
                     }
                 }
             }
+
+            // Restore original viewport if we changed it
+            if (!wasDesktop) { setDesktopMode(false); setIsDesktopMode(false); }
             setIsDownloading(false);
             setAlertConfig({isOpen: true, message: `Download Complete! (${cost} Coins Deducted)`});
         }, 500);
@@ -1088,7 +1505,12 @@ export const LessonView: React.FC<Props> = ({
                    </div>
                )}
 
-               <div className="flex items-center justify-between p-4 bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+               {rotateToast && (
+                   <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[9999] bg-slate-800 text-white text-xs font-bold px-4 py-2 rounded-xl shadow-lg animate-in fade-in">
+                       {rotateToast}
+                   </div>
+               )}
+               <div className={`flex items-center justify-between p-4 bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm${isImmersive ? ' hidden' : ''}`}>
                    <div className="flex gap-2">
                        <button onClick={onBack} className="flex items-center gap-2 text-slate-600 font-bold text-sm bg-slate-100 px-3 py-2 rounded-lg hover:bg-slate-200 transition-colors">
                            <ArrowLeft size={16} /> Exit
@@ -1103,7 +1525,22 @@ export const LessonView: React.FC<Props> = ({
                        )}
 
                    </div>
-                   <div className="flex items-center gap-3"><button onClick={toggleFullScreen} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200" title="Toggle Fullscreen"><Maximize size={20} /></button>
+                   <div className="flex items-center gap-3">
+                       <button
+                           onClick={handleRotate}
+                           className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200 transition-colors"
+                           title="Screen Rotate"
+                       >
+                           <RotateCcw size={18} />
+                       </button>
+                       <button
+                           onClick={toggleDesktopMode}
+                           className={`p-2 rounded-full transition-colors ${isDesktopMode ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                           title={isDesktopMode ? 'Desktop Mode ON' : 'Desktop Mode OFF'}
+                       >
+                           <Monitor size={18} />
+                       </button>
+                       <button onClick={toggleFullScreen} className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200" title="Toggle Fullscreen"><Maximize size={20} /></button>
                        <button onClick={() => setShowTopicSidebar(true)} className="p-2 bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200" title="View Topic Progress">
                            <List size={20} />
                        </button>
@@ -1806,6 +2243,7 @@ export const LessonView: React.FC<Props> = ({
                     </div>
                 </div>
 
+               {floatingBtn}
                <DownloadOptionsModal
                    isOpen={downloadModalOpen}
                    onClose={() => setDownloadModalOpen(false)}
@@ -1814,7 +2252,7 @@ export const LessonView: React.FC<Props> = ({
                    onDownloadMhtml={() => handleConfirmDownload('MHTML')}
                />
 
-               <div className="fixed bottom-0 left-0 right-0 w-full mx-auto p-4 pb-safe sm:pb-4 bg-white border-t border-slate-200 flex gap-3 z-[9999] shadow-[0_-4px_10px_rgba(0,0,0,0.05)]">
+               <div className={`fixed bottom-0 left-0 right-0 w-full mx-auto p-4 pb-safe sm:pb-4 bg-white border-t border-slate-200 flex gap-3 z-[9999] shadow-[0_-4px_10px_rgba(0,0,0,0.05)]${isImmersive ? ' hidden' : ''}`}>
                    {batchIndex > 0 && (
                        <button onClick={handlePrevPage} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl flex items-center justify-center gap-2">
                            <ChevronLeft size={20} /> Back

@@ -2,6 +2,17 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Volume2, Square, ListChecks } from 'lucide-react';
 import { speakText, stopSpeech } from '../utils/textToSpeech';
 
+const TTS_SPEED_KEY = 'nst_tts_speed';
+export const getStoredTtsSpeed = (): number => {
+  try {
+    const v = parseFloat(localStorage.getItem(TTS_SPEED_KEY) || '1');
+    return isNaN(v) ? 1.0 : v;
+  } catch { return 1.0; }
+};
+export const setStoredTtsSpeed = (rate: number) => {
+  try { localStorage.setItem(TTS_SPEED_KEY, String(rate)); } catch {}
+};
+
 interface AllQ {
   question: string;
   options: string[];
@@ -45,6 +56,8 @@ interface Props {
    * question card stays uncluttered.
    */
   mode?: 'qa' | 'all';
+  /** TTS playback rate. Defaults to value stored in localStorage. */
+  rate?: number;
 }
 
 const stripHtml = (s: string) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -61,16 +74,17 @@ export const McqSpeakButtons: React.FC<Props> = ({
   revealAnswer = true,
   compact = false,
   mode: externalMode,
+  rate,
 }) => {
   const [active, setActive] = useState<null | 'qa' | 'all'>(null);
   const cancelRef = useRef(false);
+
+  const getRate = () => rate ?? getStoredTtsSpeed();
 
   const cleanQ = stripHtml(question);
   const cleanOpts = options.map(o => stripHtml(o));
   const correctText = cleanOpts[correctAnswer] ?? '';
 
-  // When revealAnswer === false (MCQ mode, not yet fully answered),
-  // both buttons keep the answer hidden in TTS output too.
   const qaText = revealAnswer
     ? `Question: ${cleanQ}. Sahi jawab: ${correctText}.`
     : `Question: ${cleanQ}.`;
@@ -88,14 +102,12 @@ export const McqSpeakButtons: React.FC<Props> = ({
     setActive(null);
   };
 
-  // Speak a single string and resolve when finished.
   const speakOnce = (text: string) =>
     new Promise<void>((resolve) => {
-      speakText(text, null, 1.0, language, () => {}, () => resolve())
+      speakText(text, null, getRate(), language, () => {}, () => resolve())
         .catch(() => resolve());
     });
 
-  // Sequential chain reader. mode === 'qa' → no options, 'all' → with options.
   const playChain = async (mode: 'qa' | 'all') => {
     if (!allQuestions || allQuestions.length === 0) return;
     const start = Math.max(0, Math.min(index, allQuestions.length - 1));
@@ -107,7 +119,6 @@ export const McqSpeakButtons: React.FC<Props> = ({
       const cq = stripHtml(q.question);
       const cOpts = (q.options || []).map((o) => stripHtml(o));
       const cAns = cOpts[q.correctAnswer] ?? '';
-      // revealAnswer === false → strip answer from chain TTS too.
       const text =
         mode === 'qa'
           ? (revealAnswer
@@ -132,42 +143,33 @@ export const McqSpeakButtons: React.FC<Props> = ({
 
   const play = (mode: 'qa' | 'all') => {
     if (active === mode) {
-      // Toggle off — stop any in-flight chain or single utterance
       stopAll();
       return;
     }
     cancelRef.current = false;
     stopSpeech();
     if (allQuestions && allQuestions.length > 0) {
-      // Chain through all questions
       playChain(mode);
       return;
     }
-    // Fallback: single question
     setActive(mode);
     const text = mode === 'qa' ? qaText : allText;
     speakText(
       text,
       null,
-      1.0,
+      getRate(),
       language,
       () => setActive(mode),
       () => setActive(null)
     ).catch(() => setActive(null));
   };
 
-  // Stop on hide / unmount
   useEffect(() => {
     const handleVisibility = () => {
-      if (document.hidden && active) {
-        stopAll();
-      }
+      if (document.hidden && active) stopAll();
     };
     document.addEventListener('visibilitychange', handleVisibility);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibility);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, [active]);
 
   useEffect(() => {
@@ -175,7 +177,6 @@ export const McqSpeakButtons: React.FC<Props> = ({
       cancelRef.current = true;
       if (active) stopSpeech();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const baseBtn =
@@ -183,30 +184,17 @@ export const McqSpeakButtons: React.FC<Props> = ({
 
   const isChainCapable = !!(allQuestions && allQuestions.length > 1);
 
-  // External-mode variant: parent picks the read mode at the top of the
-  // page (Q+ANS or ALL) and we render a single small speaker icon per
-  // question. Tap = read THIS question only using the chosen mode (no
-  // chain). Tap again to stop. Used by the Homework MCQ Practice list.
   if (externalMode) {
     const isPlaying = active === externalMode;
     const handleClick = (e: React.MouseEvent) => {
       e.stopPropagation();
-      if (isPlaying) {
-        stopAll();
-        return;
-      }
+      if (isPlaying) { stopAll(); return; }
       cancelRef.current = false;
       stopSpeech();
       setActive(externalMode);
       const text = externalMode === 'qa' ? qaText : allText;
-      speakText(
-        text,
-        null,
-        1.0,
-        language,
-        () => setActive(externalMode),
-        () => setActive(null),
-      ).catch(() => setActive(null));
+      speakText(text, null, getRate(), language, () => setActive(externalMode), () => setActive(null))
+        .catch(() => setActive(null));
     };
     const tip = externalMode === 'qa'
       ? (revealAnswer ? 'Question + sahi jawab sune' : 'Question sune')
@@ -228,9 +216,6 @@ export const McqSpeakButtons: React.FC<Props> = ({
     );
   }
 
-  // Lucent-style compact variant: a single round speaker icon button that
-  // reads the question (and the answer iff revealAnswer === true). Used by
-  // the new Class 6-12 MCQ Interactive List per-card speaker.
   if (compact) {
     const tip = revealAnswer
       ? (isChainCapable ? 'Saare questions + sahi jawab sune' : 'Question + sahi jawab sune')
@@ -266,7 +251,7 @@ export const McqSpeakButtons: React.FC<Props> = ({
         }`}
       >
         {active === 'qa' ? <Square size={iconSize} fill="currentColor" /> : <Volume2 size={iconSize} />}
-        Q+Ans
+        {isChainCapable ? 'Read All' : 'Q+Ans'}
       </button>
       <button
         type="button"

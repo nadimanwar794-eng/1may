@@ -12,6 +12,7 @@ import { SpeakButton } from './SpeakButton';
 interface Props {
   onLogin: (user: User) => void;
   logActivity: (action: string, details: string, user?: User) => void;
+  appSettings?: SystemSettings;
 }
 
 type AuthView = 'HOME' | 'LOGIN' | 'SIGNUP' | 'ADMIN' | 'RECOVERY' | 'SUCCESS_ID';
@@ -22,7 +23,7 @@ const BLOCKED_DOMAINS = [
     'dispostable.com', 'grr.la', 'mailnesia.com', 'temp-mail.org', 'fake-email.com'
 ];
 
-export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
+export const Auth: React.FC<Props> = ({ onLogin, logActivity, appSettings }) => {
   const [view, setView] = useState<AuthView>('HOME');
   const [generatedId, setGeneratedId] = useState<string>('');
   const [formData, setFormData] = useState({
@@ -56,6 +57,14 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
   const [requestTimestamp, setRequestTimestamp] = useState<number | null>(null);
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const [showPassword, setShowPassword] = useState(false);
+  const [welcomeUser, setWelcomeUser] = useState<any>(null);
+  const [welcomeFading, setWelcomeFading] = useState(false);
+
+  const triggerWelcome = (user: any) => {
+    setWelcomeUser(user);
+    setTimeout(() => setWelcomeFading(true), 2200);
+    setTimeout(() => { setWelcomeUser(null); setWelcomeFading(false); onLogin(user); }, 2700);
+  };
 
   useEffect(() => {
       const s = localStorage.getItem('nst_system_settings');
@@ -136,7 +145,7 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
               }
 
               logActivity("LOGIN", "Student Logged In via Google Auth", appUser);
-              onLogin(appUser);
+              triggerWelcome(appUser);
               return;
           } else {
               const newId = generateUserId();
@@ -149,7 +158,7 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
                   mobile: firebaseUser.phoneNumber || '',
                   role: 'STUDENT',
                   createdAt: new Date().toISOString(),
-                  credits: settings?.signupBonus || 2,
+                  credits: settings?.signupBonus || 50,
                   streak: 0,
                   lastLoginDate: new Date().toISOString(),
                   board: '', // Left empty to trigger onboarding
@@ -164,7 +173,7 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
 
               await saveUserToLive(appUser);
               logActivity("SIGNUP_GOOGLE", "New Student Registered via Google", appUser);
-              onLogin(appUser);
+              triggerWelcome(appUser);
           }
 
       } catch (err: any) {
@@ -180,7 +189,85 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
     // Completely remove `nst_users` local dependency.
     // Fetch directly from Firebase only.
 
-    if (view === 'RECOVERY') {
+    if (view === 'SIGNUP') {
+        if (!validateEmail(formData.email)) {
+            setError("Please enter a valid email address.");
+            return;
+        }
+        if (formData.password.length < 6) {
+            setError("Password must be at least 6 characters.");
+            return;
+        }
+
+        try {
+            await setPersistence(auth, browserLocalPersistence);
+            const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+            const firebaseUser = userCredential.user;
+
+            const newId = generateUserId();
+            let appUser = {
+                id: firebaseUser.uid,
+                displayId: newId,
+                name: 'Student',
+                email: formData.email,
+                password: formData.password,
+                mobile: '',
+                role: 'STUDENT',
+                createdAt: new Date().toISOString(),
+                credits: settings?.signupBonus || 50,
+                streak: 0,
+                lastLoginDate: new Date().toISOString(),
+                board: '',
+                classLevel: '',
+                provider: 'email',
+                profileCompleted: true,
+                progress: {},
+                redeemedCodes: [],
+                subscriptionTier: 'FREE',
+                isPremium: false
+            };
+
+            await saveUserToLive(appUser);
+            logActivity("SIGNUP_EMAIL", "New Student Registered via Email", appUser);
+            setGeneratedId(newId);
+            setPendingLoginUser(appUser);
+            setView('SUCCESS_ID');
+        } catch (err) {
+            console.error("Signup Error:", err);
+            if (err.code === 'auth/email-already-in-use') {
+                setError("Email is already in use. Please log in.");
+            } else {
+                setError(err.message || "Signup Failed. Try again.");
+            }
+        }
+    } else if (view === 'LOGIN') {
+        try {
+            await setPersistence(auth, browserLocalPersistence);
+            const userCredential = await signInWithEmailAndPassword(auth, formData.email, formData.password);
+            const firebaseUser = userCredential.user;
+
+            let appUser = await getUserData(firebaseUser.uid);
+
+            if (!appUser && firebaseUser.email) {
+                appUser = await getUserByEmail(firebaseUser.email);
+            }
+
+            if (appUser) {
+                if (appUser.id !== firebaseUser.uid) {
+                    const oldId = appUser.id;
+                    appUser = { ...appUser, id: firebaseUser.uid, provider: 'email' };
+                    await updateUserUID(oldId, firebaseUser.uid, appUser);
+                }
+                logActivity("LOGIN", "Student Logged In via Email", appUser);
+                triggerWelcome(appUser);
+            } else {
+                setError("User data not found in system.");
+            }
+        } catch (err) {
+            console.error("Login Error:", err);
+            setError("Invalid Email or Password.");
+        }
+    } else if (view === 'RECOVERY') {
         const input = formData.id.trim();
         const pass = formData.password.trim();
 
@@ -204,7 +291,7 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
                      appUser = { ...appUser, ...freshUser };
                 }
                 logActivity("LOGIN", "Student Logged In (Custom DB Auth)", appUser);
-                onLogin(appUser);
+                triggerWelcome(appUser);
 
                 // FIREBASE SYNC (Run in background so UI is fast)
                 try {
@@ -254,7 +341,7 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
                 } as User;
                 await saveUserToLive(appUser);
                 logActivity("LOGIN", "Student Logged In (Firebase)", appUser);
-                onLogin(appUser);
+                triggerWelcome(appUser);
             } else {
                 // They entered a mobile/ID that doesn't exist in our DB
                 setError("User not found. Please verify your Mobile/ID or try using your Email to login.");
@@ -305,6 +392,98 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
     }
   };
 
+  /* ── PREMIUM WELCOME OVERLAY ── */
+  if (welcomeUser) {
+    const name = (welcomeUser.name || 'Student').split(' ')[0];
+    const particles = [
+      { left:'15%', delay:'0s',   dur:'1.8s', size:6,  color:'#fbbf24' },
+      { left:'30%', delay:'0.3s', dur:'2.2s', size:4,  color:'#a78bfa' },
+      { left:'50%', delay:'0.1s', dur:'1.6s', size:8,  color:'#f472b6' },
+      { left:'65%', delay:'0.5s', dur:'2s',   size:5,  color:'#34d399' },
+      { left:'80%', delay:'0.2s', dur:'1.9s', size:4,  color:'#60a5fa' },
+      { left:'45%', delay:'0.7s', dur:'2.4s', size:6,  color:'#fbbf24' },
+      { left:'22%', delay:'0.4s', dur:'1.7s', size:3,  color:'#f9a8d4' },
+      { left:'72%', delay:'0.6s', dur:'2.1s', size:5,  color:'#818cf8' },
+    ];
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 9999, overflow: 'hidden',
+        background: 'linear-gradient(135deg, #07050f 0%, #160830 45%, #07050f 100%)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        animation: welcomeFading ? 'welcome-fade-out 0.5s ease forwards' : 'welcome-fade-in 0.5s ease forwards'
+      }}>
+        {/* Floating particles */}
+        {particles.map((p, i) => (
+          <div key={i} style={{
+            position: 'absolute', bottom: '12%', left: p.left,
+            width: p.size, height: p.size, borderRadius: '50%', background: p.color,
+            animation: `welcome-particle ${p.dur} ease-out ${p.delay} infinite`,
+            filter: 'blur(0.5px)'
+          }} />
+        ))}
+
+        {/* Outer ring glow */}
+        <div style={{
+          position: 'absolute', width: 340, height: 340, borderRadius: '50%',
+          background: 'radial-gradient(circle, rgba(167,139,250,0.12) 0%, transparent 70%)',
+          pointerEvents: 'none'
+        }} />
+
+        {/* Main card */}
+        <div style={{
+          position: 'relative', textAlign: 'center', padding: '0 32px',
+          animation: 'welcome-badge-pop 0.6s cubic-bezier(.34,1.56,.64,1) 0.1s both'
+        }}>
+          {/* Crown / star badge */}
+          <div style={{
+            width: 72, height: 72, borderRadius: '50%', margin: '0 auto 20px',
+            background: 'linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #d97706 100%)',
+            boxShadow: '0 0 32px rgba(251,191,36,0.5), 0 0 64px rgba(251,191,36,0.25)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 34
+          }}>✦</div>
+
+          {/* Welcome text with gold shimmer */}
+          <h1 style={{
+            fontSize: 52, fontWeight: 900, letterSpacing: '-1px', lineHeight: 1,
+            background: 'linear-gradient(90deg, #fbbf24, #f9fafb, #fbbf24, #fde68a, #fbbf24)',
+            backgroundSize: '200% auto',
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+            animation: 'welcome-shimmer-gold 2s linear infinite'
+          }}>Welcome</h1>
+
+          {/* Student name */}
+          <p style={{
+            marginTop: 10, fontSize: 22, fontWeight: 800, color: '#e2e8f0', letterSpacing: '0.02em'
+          }}>{name}</p>
+
+          {/* Tagline */}
+          <p style={{
+            marginTop: 8, fontSize: 11, fontWeight: 600, color: '#6366f1',
+            letterSpacing: '0.18em', textTransform: 'uppercase'
+          }}>Your Learning Journey Begins</p>
+
+          {/* Thin gold divider */}
+          <div style={{
+            margin: '20px auto 0', width: 60, height: 2, borderRadius: 2,
+            background: 'linear-gradient(90deg, transparent, #fbbf24, transparent)'
+          }} />
+        </div>
+
+        {/* Progress bar */}
+        <div style={{
+          position: 'absolute', bottom: 0, left: 0, right: 0, height: 3,
+          background: 'rgba(255,255,255,0.08)'
+        }}>
+          <div style={{
+            height: '100%', background: 'linear-gradient(90deg, #a78bfa, #fbbf24, #f472b6)',
+            animation: 'welcome-progress 2.5s linear forwards'
+          }} />
+        </div>
+      </div>
+    );
+  }
+
   if (view === 'SUCCESS_ID') {
       return (
         <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4 font-sans">
@@ -322,7 +501,7 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
                 </div>
                 <button 
                     onClick={() => {
-                        if (pendingLoginUser) onLogin(pendingLoginUser);
+                        if (pendingLoginUser) triggerWelcome(pendingLoginUser);
                         else setView('LOGIN'); 
                     }} 
                     className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl"
@@ -369,15 +548,18 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
         {view !== 'HOME' && (
             <h2 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2 relative z-10">
               {view === 'LOGIN' && <LogIn className="text-blue-600" />}
+              {view === 'SIGNUP' && <UserPlus className="text-blue-600" />}
               {view === 'RECOVERY' && <KeyRound className="text-orange-500" />}
 
               <span className="flex-1">
-                {view === 'LOGIN' && 'Student Login'}
-                  {view === 'RECOVERY' && 'Recovery Login'}
+                {view === 'LOGIN' && 'Log in'}
+                {view === 'SIGNUP' && 'Create Account'}
+                {view === 'RECOVERY' && 'Recovery Login'}
                 {view === 'ADMIN' && (showAdminVerify ? 'Admin Verification' : 'Admin Login')}
               </span>
 
-              {view === 'LOGIN' && <SpeakButton text="Welcome! Enter your Mobile Number, Email or UID, and password to login." className="text-blue-600 hover:bg-blue-50" />}
+              {view === 'LOGIN' && <SpeakButton text="Welcome! Enter your Email and password to login." className="text-blue-600 hover:bg-blue-50" />}
+              {view === 'SIGNUP' && <SpeakButton text="Welcome! Enter your Email and password to create an account." className="text-blue-600 hover:bg-blue-50" />}
               {view === 'RECOVERY' && <SpeakButton text="Enter your Mobile Number and Recovery Password to login." className="text-orange-500 hover:bg-orange-50" />}
             </h2>
         )}
@@ -390,23 +572,55 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
 
         {view === 'HOME' && (
             <div className="space-y-6 relative z-10 animate-in fade-in mt-10">
-                 <button type="button" onClick={handleGoogleAuth} className="w-full bg-[#e2e8f0] hover:bg-[#cbd5e1] text-[#1e293b] font-bold py-4 rounded-[2rem] flex items-center justify-center gap-3 transition-all active:scale-95">
+                 <button type="button" onClick={() => setView('SIGNUP')} className="w-full bg-[#111827] hover:bg-[#1f2937] text-white font-bold py-4 rounded-[2rem] flex items-center justify-center gap-3 transition-all shadow-lg active:scale-95">
                      Create Account
                  </button>
 
-                 <button type="button" onClick={handleGoogleAuth} className="w-full bg-[#e2e8f0] hover:bg-[#cbd5e1] text-[#1e293b] font-bold py-4 rounded-[2rem] flex items-center justify-center gap-3 transition-all active:scale-95">
+                 <button type="button" onClick={() => setView('LOGIN')} className="w-full bg-[#e2e8f0] hover:bg-[#cbd5e1] text-[#1e293b] font-bold py-4 rounded-[2rem] flex items-center justify-center gap-3 transition-all active:scale-95">
                      Log in
                  </button>
 
-                 <button type="button" onClick={() => setView('RECOVERY')} className="w-full bg-orange-50 hover:bg-orange-100 text-orange-600 font-bold py-4 rounded-[2rem] flex items-center justify-center gap-3 transition-all active:scale-95 border-2 border-orange-200">
-                     <Lock size={18} /> Login via Recovery
-                 </button>
             </div>
         )}
 
         {view !== 'HOME' && (
             <form onSubmit={handleSubmit} className="space-y-4 relative z-10">
-                            {view === 'RECOVERY' && (
+                            {(view === 'LOGIN' || view === 'SIGNUP') && (
+                  <>
+                     <div className="space-y-1.5">
+                         <label className="text-xs font-bold text-slate-600 uppercase">Email Address</label>
+                         <input name="email" type="email" placeholder="Enter your email" value={formData.email} onChange={handleChange} className="w-full px-4 py-3 border border-slate-200 rounded-xl font-bold bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none transition-all" required />
+                     </div>
+                     <div className="space-y-1.5">
+                         <label className="text-xs font-bold text-slate-600 uppercase">Password</label>
+                         <div className="relative">
+                             <input name="password" type={showPassword ? "text" : "password"} placeholder={view === 'SIGNUP' ? "Create a password" : "Enter your password"} value={formData.password} onChange={handleChange} className="w-full px-4 py-3 border border-slate-200 rounded-xl font-bold bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none transition-all pr-10" required />
+                             <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-600">
+                                 {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                             </button>
+                         </div>
+                     </div>
+                     <button type="submit" className="w-full bg-[#111827] hover:bg-[#1f2937] text-white font-bold py-3.5 rounded-xl mt-4 shadow-lg transition-all active:scale-95">
+                         {view === 'LOGIN' ? 'Log In' : 'Create Account'}
+                     </button>
+
+                     <div className="text-center mt-6">
+                         <div className="relative">
+                             <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div>
+                             <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-slate-500 font-bold">Or continue with</span></div>
+                         </div>
+
+                         <button type="button" onClick={handleGoogleAuth} className="w-full mt-4 relative overflow-hidden bg-gradient-to-r from-[#4285F4] via-[#34A853] to-[#EA4335] p-[2px] rounded-2xl shadow-lg active:scale-95 transition-all hover:shadow-xl hover:scale-[1.01]">
+                             <div className="flex items-center justify-center gap-3 bg-white rounded-[14px] py-3 px-4">
+                                 <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
+                                 <span className="font-black text-slate-800 text-sm tracking-wide">Continue with Google</span>
+                             </div>
+                         </button>
+                     </div>
+                  </>
+              )}
+
+              {view === 'RECOVERY' && (
                   <>
                      <div className="space-y-1.5"><label className="text-xs font-bold text-slate-600 uppercase">Mobile Number / Email / UID</label><input name="id" type="text" placeholder="Enter Mobile Number" value={formData.id} onChange={handleChange} className="w-full px-4 py-3 border border-slate-200 rounded-xl font-bold" /></div>
                      <div className="space-y-1.5">
@@ -426,9 +640,11 @@ export const Auth: React.FC<Props> = ({ onLogin, logActivity }) => {
                              <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-slate-500 font-bold">Or</span></div>
                          </div>
 
-                         <button type="button" onClick={handleGoogleAuth} className="w-full mt-6 bg-white border border-slate-200 hover:border-blue-600 hover:bg-blue-50 text-slate-700 font-bold py-3 rounded-xl flex items-center justify-center gap-3 transition-all shadow-sm">
-                             <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
-                             Login with Google
+                         <button type="button" onClick={handleGoogleAuth} className="w-full mt-4 relative overflow-hidden bg-gradient-to-r from-[#4285F4] via-[#34A853] to-[#EA4335] p-[2px] rounded-2xl shadow-lg active:scale-95 transition-all hover:shadow-xl hover:scale-[1.01]">
+                             <div className="flex items-center justify-center gap-3 bg-white rounded-[14px] py-3 px-4">
+                                 <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
+                                 <span className="font-black text-slate-800 text-sm tracking-wide">Continue with Google</span>
+                             </div>
                          </button>
                      </div>
                   </>

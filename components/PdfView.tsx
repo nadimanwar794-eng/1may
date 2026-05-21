@@ -4,7 +4,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Chapter, User, Subject, SystemSettings, HtmlModule, PremiumNoteSlot, DeepDiveEntry, AdditionalNoteEntry } from '../types';
-import { FileText, Lock, ArrowLeft, Crown, Star, CheckCircle, AlertCircle, Globe, Maximize, Minimize, Layers, HelpCircle, Minus, Plus, Volume2, Square, Zap, Headphones, BookOpen, Music, Play, Pause, SkipForward, SkipBack, Book, List, Layout, ExternalLink, GraduationCap, ChevronRight, Sparkles, RotateCw, Palette, Type } from 'lucide-react';
+import { FileText, Lock, ArrowLeft, Crown, Star, CheckCircle, AlertCircle, Globe, Maximize, Minimize, Layers, HelpCircle, Minus, Plus, Volume2, VolumeX, Square, Zap, Headphones, BookOpen, Music, Play, Pause, SkipForward, SkipBack, Book, List, Layout, ExternalLink, GraduationCap, ChevronRight, Sparkles, RotateCw, RotateCcw, Palette, Type, Monitor } from 'lucide-react';
 import { ReadingStylePopover } from './ReadingStylePopover';
 import { CustomAlert } from './CustomDialogs';
 import { getChapterData, saveUserToLive } from '../firebase';
@@ -16,8 +16,10 @@ import { ChunkedNotesReader } from './ChunkedNotesReader';
 import { ErrorBoundary } from './ErrorBoundary';
 import { DEFAULT_CONTENT_INFO_CONFIG } from '../constants';
 import { saveRecentChapter, markReadToday } from '../utils/recentReads';
+import { downloadAsMHTML } from '../utils/downloadUtils';
+import { rotateScreen } from '../utils/displayPrefs';
 import { checkFeatureAccess } from '../utils/permissionUtils';
-import { speakText, stopSpeech } from '../utils/textToSpeech';
+import { speakText, stopSpeech, stripHtml } from '../utils/textToSpeech';
 import { saveOfflineItem } from '../utils/offlineStorage';
 import { Download } from 'lucide-react';
 import { Document, Page, pdfjs } from 'react-pdf';
@@ -40,6 +42,11 @@ interface Props {
   directResource?: { url: string, access: string };
   // NEW: Lucent-style cross-tab switch from Notes (PdfView) → MCQ (McqView).
   onSwitchToMcq?: () => void;
+  onSwitchToFlashcard?: () => void;
+    /** Notify parent that immersive mode changed (used to hide global bottom nav) */
+    onImmersiveChange?: (isImmersive: boolean) => void;
+  /** When true, hides the sticky top header (used by landscape floating button). */
+  hideHeader?: boolean;
 }
 
 // Helper to remove leading/trailing artifacts like quotes, HTML entities, emojis, and dashes from Quick Revision points
@@ -78,12 +85,13 @@ const formatDriveLink = (link: string) => {
         formatted = link.replace(/\/view.*/, '/preview');
     }
 
-    // Add parameters to suppress UI (Minimal Mode)
+    // Add parameters to suppress UI (Minimal Mode + Embedded)
     if (formatted.includes('drive.google.com')) {
-        // Remove existing parameters if any to avoid duplicates
-        // Append rm=minimal to hide header/toolbar
         if (!formatted.includes('rm=minimal')) {
             formatted += formatted.includes('?') ? '&rm=minimal' : '?rm=minimal';
+        }
+        if (!formatted.includes('embedded=true')) {
+            formatted += '&embedded=true';
         }
     }
 
@@ -160,7 +168,7 @@ const extractTopicsFromHtml = (html: string): { title: string, content: string }
 };
 
 export const PdfView: React.FC<Props> = ({ 
-  chapter, subject, user, board, classLevel, stream, onBack, onUpdateUser, settings, initialSyllabusMode, directResource, onSwitchToMcq
+    chapter, subject, user, board, classLevel, stream, onBack, onUpdateUser, settings, initialSyllabusMode, directResource, onSwitchToMcq, onSwitchToFlashcard, onImmersiveChange, hideHeader
 }) => {
   const [contentData, setContentData] = useState<any>({});
   const [loading, setLoading] = useState(true);
@@ -189,6 +197,7 @@ export const PdfView: React.FC<Props> = ({
   // best fit ho sakti hai. 4 tap me wapas original orientation aa jaati hai.
   const [pdfRotation, setPdfRotation] = useState(0);
   const rotatePdf = () => setPdfRotation(r => (r + 90) % 360);
+  const [isTeacherReading, setIsTeacherReading] = useState(false);
   // INLINE READ MORE — color theme picker. ChunkedNotesReader apna khud
   // ka colour control deta hai but uska state library reference ke andar
   // re-mount par reset ho jata hai. Yahaan ek lightweight wrapper-level
@@ -229,6 +238,10 @@ export const PdfView: React.FC<Props> = ({
 
   // Swipe handler logic
   const handleTouchStart = (e: React.TouchEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('table') || target.closest('.chnr-table-wrap') || target.closest('.table-container') || target.closest('input[type="range"]')) {
+      return;
+    }
     setTouchStartX(e.targetTouches[0].clientX);
   };
 
@@ -416,20 +429,126 @@ export const PdfView: React.FC<Props> = ({
   const [activeTopicIndex, setActiveTopicIndex] = useState(0);
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
   const [topicSpeakingState, setTopicSpeakingState] = useState<number | null>(null); // Index of topic currently speaking
+  // Read Mode = ChunkedNotesReader (TTS), Write Mode = HTML rendered view
+  const [deepDiveViewMode, setDeepDiveViewMode] = useState<'chunk' | 'html'>('chunk');
+  const [htmlTtsTopicIdx, setHtmlTtsTopicIdx] = useState<number | null>(null);
+  const [writeModePendingCost, setWriteModePendingCost] = useState<number>(0);
+    const [isImmersive, setIsImmersive] = useState(false);
 
   // TEACHER STRATEGY STATE
   const [currentStrategyIndex, setCurrentStrategyIndex] = useState(0);
+  // Topic change hone par teacher TTS band kar do
+  useEffect(() => {
+    stopSpeech();
+    setIsTeacherReading(false);
+  }, [currentStrategyIndex]);
+
+  // CONTINUE READING POSITION TRACKING
+  // Saves which topic card + which line was last being read, so:
+  // 1. Opening from Continue Reading shows a "Last Read" badge on that card
+  // 2. "Read All" resumes from that topic+line instead of always starting from topic 0
+  const CR_TOPIC_KEY = `nst_cr_topic_${chapter.id}`;
+  const CR_LINE_KEY  = `nst_cr_line_${chapter.id}`;
+  const [lastReadTopicIdx, setLastReadTopicIdx] = useState<number>(() => {
+      try { return parseInt(localStorage.getItem(CR_TOPIC_KEY) || '0', 10) || 0; } catch { return 0; }
+  });
+  const [lastReadLineMap, setLastReadLineMap] = useState<Record<number, number>>(() => {
+      try { return JSON.parse(localStorage.getItem(CR_LINE_KEY) || '{}'); } catch { return {}; }
+  });
+  const saveReadPosition = (topicIdx: number, lineIdx: number) => {
+      setLastReadTopicIdx(topicIdx);
+      setLastReadLineMap(prev => {
+          const next = { ...prev, [topicIdx]: lineIdx };
+          try { localStorage.setItem(CR_LINE_KEY, JSON.stringify(next)); } catch {}
+          return next;
+      });
+      try { localStorage.setItem(CR_TOPIC_KEY, String(topicIdx)); } catch {}
+  };
+
+  // When chapter opens from Continue Reading, scroll to the last read topic card
+  useEffect(() => {
+      if (lastReadTopicIdx <= 0) return;
+      const t = setTimeout(() => {
+          document.getElementById(`topic-card-${lastReadTopicIdx}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 700);
+      return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [isLandscapePdf, setIsLandscapePdf] = useState<boolean>(() => {
+    try { return window.matchMedia('(orientation: landscape)').matches; } catch { return false; }
+  });
+  useEffect(() => {
+    const mq = window.matchMedia('(orientation: landscape)');
+    const handler = (e: MediaQueryListEvent) => setIsLandscapePdf(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+  const handleRotatePdf = async () => {
+    const result = await rotateScreen();
+    if (result === null) alert('Is device mein screen auto-rotate support nahi hai. Phone ko manually ghuma sakte hain.');
+  };
+
+  // WRITE MODE CREDIT CHECK — har baar html view khulne par check
+  const handleWriteModeClick = () => {
+    if (deepDiveViewMode === 'html') {
+      stopSpeech(); setIsAutoPlaying(false); setDeepDiveViewMode('chunk');
+      return;
+    }
+    if (user.role === 'ADMIN') {
+      stopSpeech(); setIsAutoPlaying(false); setDeepDiveViewMode('html');
+      return;
+    }
+    const todayStr = new Date().toDateString();
+    const dailyCount = (user.dailyWriteDate === todayStr) ? (user.dailyWriteCount ?? 0) : 0;
+    const freeLimit = user.subscriptionLevel === 'ULTRA'
+      ? (settings?.writeModeFreeLimitUltra ?? 10)
+      : user.subscriptionLevel === 'BASIC'
+      ? (settings?.writeModeFreeLimitBasic ?? 5)
+      : 0;
+    if (dailyCount < freeLimit) {
+      const updatedUser = { ...user, dailyWriteDate: todayStr, dailyWriteCount: dailyCount + 1 };
+      localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
+      saveUserToLive(updatedUser);
+      onUpdateUser(updatedUser);
+      stopSpeech(); setIsAutoPlaying(false); setDeepDiveViewMode('html');
+      return;
+    }
+    const maxLimit = settings?.writeModeMaxLimit ?? 20;
+    let cost: number;
+    if (dailyCount >= maxLimit) cost = 20;
+    else if (user.subscriptionLevel) cost = settings?.writeModeCreditPaid ?? 10;
+    else cost = settings?.writeModeCreditFree ?? 5;
+    if (user.credits < cost) {
+      setAlertConfig({ isOpen: true, message: `Write Mode ke liye ${cost} coins chahiye! Aapke paas sirf ${user.credits} coins hain.` });
+      return;
+    }
+    setWriteModePendingCost(cost);
+  };
 
   // ZOOM STATE
   const [zoom, setZoom] = useState(1);
+  const [writeZoom, setWriteZoom] = useState(1);
   const handleZoomIn = () => setZoom(prev => Math.min(prev + 0.25, 3));
   const handleZoomOut = () => setZoom(prev => Math.max(prev - 0.25, 0.5));
   
   // INFO POPUP STATE
   const [infoPopup, setInfoPopup] = useState<{isOpen: boolean, config: any, type: 'FREE' | 'PREMIUM'}>({isOpen: false, config: {}, type: 'FREE'});
 
-  // TTS STATE (Global)
-  const [speechRate, setSpeechRate] = useState(1.0);
+  // TTS STATE (Global) — reads from localStorage so speed persists across sessions
+  const TTS_SPEEDS = [1.0, 1.25, 1.5, 2.0, 0.75];
+  const getStoredRate = () => {
+      try { const v = parseFloat(localStorage.getItem('nst_tts_speed') || '1'); return isNaN(v) ? 1.0 : v; } catch { return 1.0; }
+  };
+  const [speechRate, setSpeechRate] = useState<number>(getStoredRate);
+  const cycleSpeechRate = () => {
+      setSpeechRate(prev => {
+          const idx = TTS_SPEEDS.indexOf(prev);
+          const next = TTS_SPEEDS[(idx + 1) % TTS_SPEEDS.length];
+          try { localStorage.setItem('nst_tts_speed', String(next)); } catch {}
+          return next;
+      });
+  };
 
   const getFeatureIdForTab = (tab: string) => {
       switch(tab) {
@@ -626,6 +745,19 @@ export const PdfView: React.FC<Props> = ({
 
   // Alert
   const [alertConfig, setAlertConfig] = useState<{isOpen: boolean, message: string}>({isOpen: false, message: ''});
+
+  // Landscape detection for split-screen notes layout
+  const [isLandscape, setIsLandscape] = useState<boolean>(() => {
+    try { return window.matchMedia('(orientation: landscape)').matches; } catch { return false; }
+  });
+  useEffect(() => {
+    try {
+      const mq = window.matchMedia('(orientation: landscape)');
+      const handler = (e: MediaQueryListEvent) => setIsLandscape(e.matches);
+      mq.addEventListener('change', handler);
+      return () => mq.removeEventListener('change', handler);
+    } catch {}
+  }, []);
 
   // DEEP DIVE AUTO-OPEN ZEN MODE LOGIC
   // Moved to top level to avoid React Hook Error #310
@@ -1029,6 +1161,35 @@ export const PdfView: React.FC<Props> = ({
       // Only change: If type === 'DEEP_DIVE', we activate the mode instead of setActivePdf link
 
       const proceed = () => {
+          // PDF DAILY LIMIT TRACKING — basic/ultra ke liye free daily quota
+          if (user.role !== 'ADMIN' && user.subscriptionLevel) {
+              const todayStr = new Date().toDateString();
+              const freeLimit = user.subscriptionLevel === 'ULTRA'
+                  ? (settings?.pdfFreeLimitUltra ?? 10)
+                  : (settings?.pdfFreeLimitBasic ?? 5);
+              const dailyCount = (user.dailyPdfDate === todayStr) ? (user.dailyPdfCount ?? 0) : 0;
+              if (dailyCount >= freeLimit) {
+                  // Over free limit — charge credits silently
+                  const pdfCost = settings?.defaultPdfCost ?? 5;
+                  if (user.credits >= pdfCost) {
+                      const updatedUser = {
+                          ...user, credits: user.credits - pdfCost,
+                          dailyPdfDate: todayStr, dailyPdfCount: dailyCount + 1
+                      };
+                      localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
+                      saveUserToLive(updatedUser);
+                      onUpdateUser(updatedUser);
+                  }
+                  // else: let them proceed anyway (don't block for zero balance)
+              } else {
+                  const updatedUser = {
+                      ...user, dailyPdfDate: todayStr, dailyPdfCount: dailyCount + 1
+                  };
+                  localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
+                  saveUserToLive(updatedUser);
+                  onUpdateUser(updatedUser);
+              }
+          }
           if (type === 'DEEP_DIVE') {
               triggerInterstitial('DEEP_DIVE_MODE');
           } else {
@@ -1395,6 +1556,8 @@ export const PdfView: React.FC<Props> = ({
                                   content={activeNoteContent.content}
                                   topBarLabel={activeNoteContent.title || 'Additional Note'}
                                   noteKey={`pdfview_${chapter.id}_addnote_${activeNoteContent.title || 'untitled'}`}
+                                  hideTopBar={hideHeader}
+                                  preferChunkMode
                               />
                           </div>
                       </article>
@@ -1405,8 +1568,14 @@ export const PdfView: React.FC<Props> = ({
   }
 
   // --- NEW TABBED VIEW ---
+  // Compute TTS html for floating chip group (PREMIUM tab)
+  const _floatingPEntries: any[] = syllabusMode === 'SCHOOL'
+    ? (contentData?.schoolPremiumNotesList || [])
+    : (contentData?.competitionPremiumNotesList || []);
+  const floatingTtsHtml: string = (_floatingPEntries[currentPremiumEntryIdx] as any)?.content || '';
+
   return (
-    <div ref={scrollContainerRef} onScroll={handleScroll} className="bg-slate-50 h-screen overflow-y-auto pb-6 animate-in fade-in slide-in-from-right-8 m-0 p-0">
+    <div ref={scrollContainerRef} onScroll={handleScroll} className={`bg-slate-50 h-screen animate-in fade-in slide-in-from-right-8 m-0 p-0 ${activeTab === 'PREMIUM' && pdfFullscreen ? 'overflow-hidden' : 'overflow-y-auto pb-6'}`}>
        {/* Reading progress bar */}
        <div className="fixed top-0 left-0 right-0 h-1 bg-slate-200/60 z-[60] pointer-events-none">
            <div
@@ -1444,25 +1613,29 @@ export const PdfView: React.FC<Props> = ({
           ko title row mein inline kar diya — taaki URL bar ke neeche koi
           extra white gap na bache aur tabs upar aa jayein. Title row +
           tabs row sirf 2 thin rows hain ab. */
-       <div className={`sticky top-0 z-30 bg-white shadow-sm flex flex-col transition-all duration-200 w-full m-0 rounded-none ${!showHeader ? '-translate-y-full absolute opacity-0 pointer-events-none' : 'translate-y-0 opacity-100'}`}>
+       <div className={`sticky top-0 z-30 bg-white shadow-sm flex flex-col transition-all duration-200 w-full m-0 rounded-none ${(!showHeader || hideHeader) ? '-translate-y-full absolute opacity-0 pointer-events-none' : 'translate-y-0 opacity-100'}`}>
            {activeTab !== 'PREMIUM' && (
                <div className="flex items-center gap-1.5 px-2 sm:px-3 py-0.5">
                    <button onClick={onBack} className="p-1 hover:bg-slate-100 rounded-full text-slate-600 shrink-0">
                        <ArrowLeft size={16} />
                    </button>
                    <h3 className="flex-1 min-w-0 font-bold text-slate-800 leading-tight line-clamp-1 text-[13px]">{chapter.title}</h3>
-                   <button onClick={() => setSyllabusMode('SCHOOL')} className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold transition-all shrink-0 ${syllabusMode === 'SCHOOL' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600'}`}>School</button>
-                   <button onClick={() => setSyllabusMode('COMPETITION')} className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold transition-all shrink-0 ${syllabusMode === 'COMPETITION' ? 'bg-purple-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600'}`}>Comp</button>
-                   {/* Notes ↔ MCQ inline pill — title row mein hi merge kar diya
-                       taaki ek alag row na lage. Sirf MCQ button dikhata hai
-                       (already on Notes hain). */}
                    {onSwitchToMcq && (
                        <button
                            onClick={onSwitchToMcq}
-                           className="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 shrink-0 flex items-center gap-0.5"
+                           className="text-[11px] px-2.5 py-1 rounded-full font-bold bg-indigo-600 text-white hover:bg-indigo-700 shrink-0 flex items-center gap-1 shadow-sm"
                            title="Switch to MCQ"
                        >
-                           <HelpCircle size={10} /> MCQ
+                           <HelpCircle size={12} /> MCQ
+                       </button>
+                   )}
+                   {onSwitchToFlashcard && (
+                       <button
+                           onClick={onSwitchToFlashcard}
+                           className="text-[11px] px-2.5 py-1 rounded-full font-bold bg-amber-500 text-white hover:bg-amber-600 shrink-0 flex items-center gap-1 shadow-sm"
+                           title="Switch to Flashcard"
+                       >
+                           <Zap size={12} /> Flash
                        </button>
                    )}
                </div>
@@ -1512,6 +1685,32 @@ export const PdfView: React.FC<Props> = ({
                            </span>
                        )}
                    </button>
+                   {/* PDF Zoom controls */}
+                   <div className="flex items-center gap-0.5 bg-slate-100 rounded-full px-1 py-0.5 border border-slate-200">
+                       <button
+                           onClick={handleZoomOut}
+                           disabled={zoom <= 0.5}
+                           className="p-1 rounded-full text-slate-600 hover:bg-slate-200 active:bg-slate-300 disabled:opacity-30 transition-colors"
+                           title="Zoom Out"
+                       >
+                           <Minus size={13} />
+                       </button>
+                       <span
+                           className="text-[10px] font-black text-slate-700 w-8 text-center select-none cursor-pointer"
+                           onClick={() => setZoom(1)}
+                           title="Reset zoom"
+                       >
+                           {Math.round(zoom * 100)}%
+                       </span>
+                       <button
+                           onClick={handleZoomIn}
+                           disabled={zoom >= 3}
+                           className="p-1 rounded-full text-slate-600 hover:bg-slate-200 active:bg-slate-300 disabled:opacity-30 transition-colors"
+                           title="Zoom In"
+                       >
+                           <Plus size={13} />
+                       </button>
+                   </div>
                    <button
                        onClick={() => setPdfFullscreen(true)}
                        className="p-1.5 rounded-full text-slate-600 hover:bg-slate-100 shrink-0"
@@ -1601,6 +1800,33 @@ export const PdfView: React.FC<Props> = ({
                        </span>
                    )}
                </button>
+               {(floatingTtsHtml && floatingTtsHtml.length > 10) && (
+                   <button
+                       onClick={() => {
+                           if (isAutoPlaying) {
+                               stopAllSpeech();
+                           } else {
+                               const topics = extractTopicsFromHtml(floatingTtsHtml);
+                               let chunks: string[] = [];
+                               if (topics.length > 0 && topics[0].title !== "Notes") {
+                                   chunks = topics.map(t => `${t.title}. ${t.content}`);
+                               } else {
+                                   const rawText = topics[0]?.content || '';
+                                   chunks = rawText.length > 4000
+                                       ? (rawText.match(/[^.!?]+[.!?]+/g) || [rawText])
+                                       : [rawText];
+                               }
+                               setPremiumChunks(chunks);
+                               setPremiumChunkIndex(0);
+                               setIsAutoPlaying(true);
+                           }
+                       }}
+                       className={`p-2 rounded-full backdrop-blur shadow-lg border border-white/20 transition-all ${isAutoPlaying ? 'bg-red-500 text-white animate-pulse' : 'bg-black/55 text-white hover:bg-indigo-600'}`}
+                       title={isAutoPlaying ? 'Stop TTS' : 'Read aloud'}
+                   >
+                       {isAutoPlaying ? <Pause size={16} /> : <Headphones size={16} />}
+                   </button>
+               )}
                <button
                    onClick={() => setPdfFullscreen(false)}
                    className="p-2 rounded-full bg-black/55 backdrop-blur text-white shadow-lg border border-white/20"
@@ -1617,7 +1843,7 @@ export const PdfView: React.FC<Props> = ({
 
            {/* 2. DEEP DIVE (HTML + SCROLL) */}
            {activeTab === 'DEEP_DIVE' && (
-               <div className="p-0 sm:p-4 space-y-6 w-full max-w-none mx-auto">
+               <div className={deepDiveTopics.length > 0 ? 'fixed inset-0 z-[300] bg-white overflow-y-auto' : 'p-0 sm:p-4 space-y-6 w-full max-w-none mx-auto'}>
                    {(() => {
                         const access = getTabAccess('DEEP_DIVE');
 
@@ -1655,63 +1881,102 @@ export const PdfView: React.FC<Props> = ({
                                    AND duplicated the Read All inside ChunkedNotesReader.
                                    Now: single thin row with section count + tiny icon
                                    buttons (Save, Read All chain) so notes start higher. */}
-                               <div className="flex justify-between items-center px-3 sm:px-0 pt-1.5 pb-1">
-                                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{deepDiveTopics.length} Sections</p>
-                                   <div className="flex gap-1 items-center">
-                                       {/* Aa font controls — yahaan ALWAYS visible hain (Concept ke
-                                           main notes mein), Read More wrapper jaisa. Tap karne par
-                                           ek centered popup khulta hai jismein font size (A−/A+) +
-                                           686 fonts ka picker hai. */}
+                               {deepDiveTopics.length > 0 && !hideHeader && (
+                               <div className="sticky top-0 z-10 bg-white border-b border-slate-200 shadow-sm">
+                                   {/* Row 1: back + title */}
+                                   <div className="flex items-center gap-2 px-3 pt-2 pb-1">
                                        <button
-                                           onClick={() => setShowReadingStyle(true)}
-                                           className="flex items-center gap-1 px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 hover:bg-indigo-100 active:bg-indigo-200 transition-colors font-bold text-[10px] uppercase tracking-wider"
-                                           title="Font & size badlein"
-                                           aria-label="Reading style"
+                                           onClick={() => { stopSpeech(); setIsAutoPlaying(false); setActiveTab('CONCEPT' as any); }}
+                                           className="shrink-0 p-1.5 rounded-full hover:bg-slate-100 active:bg-slate-200 transition-colors text-slate-600"
+                                           title="Back"
+                                           aria-label="Back"
                                        >
-                                           <Type size={11} />
-                                           Aa
+                                           <ArrowLeft size={16} />
+                                       </button>
+                                       <div className="flex-1 min-w-0">
+                                           <p className="text-[9px] font-bold text-teal-600 uppercase tracking-wider leading-none">DEEP DIVE</p>
+                                           <p className="text-sm font-black text-slate-800 truncate leading-snug">{chapter.title}</p>
+                                       </div>
+                                       <span className="shrink-0 text-[10px] font-bold text-slate-400">{deepDiveTopics.length} Sections</span>
+                                   </div>
+                                   {/* Row 2: action buttons */}
+                                   {!(syllabusMode === 'COMPETITION' && isImmersive) && (
+                                   <div className="flex items-center gap-1 px-3 pb-2">
+                                       <button
+                                           onClick={() => { stopSpeech(); setIsAutoPlaying(false); setDeepDiveViewMode('chunk'); }}
+                                           className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${deepDiveViewMode === 'chunk' ? 'bg-amber-400 text-white border-amber-400 shadow-sm' : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'}`}
+                                       >
+                                           <Volume2 size={11} /> Read
+                                       </button>
+                                       <button
+                                           onClick={handleWriteModeClick}
+                                           className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${deepDiveViewMode === 'html' ? 'bg-teal-400 text-white border-teal-400 shadow-sm' : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'}`}
+                                           title={!user.subscriptionLevel ? 'Free: 5 coins/use' : user.subscriptionLevel === 'BASIC' ? '5 free/day' : '10 free/day'}
+                                       >
+                                           <FileText size={11} /> Write
+                                           {!user.subscriptionLevel && deepDiveViewMode !== 'html' && <span className="text-[8px] bg-amber-200 text-amber-800 px-1 rounded ml-0.5">5CR</span>}
+                                       </button>
+                                       <div className="flex items-center gap-0 bg-slate-100 rounded-lg overflow-hidden border border-slate-200 shrink-0">
+                                            <button onClick={() => setWriteZoom(Math.max(0.5, writeZoom - 0.1))} className="px-1.5 py-1 text-slate-600 text-[11px] font-black hover:bg-slate-200 transition-colors" title="Zoom Out">A-</button>
+                                            <span className="px-0.5 text-slate-500 text-[9px] font-bold min-w-[24px] text-center">{Math.round(writeZoom * 100)}%</span>
+                                            <button onClick={() => setWriteZoom(Math.min(3, writeZoom + 0.1))} className="px-1.5 py-1 text-slate-600 text-[11px] font-black hover:bg-slate-200 transition-colors" title="Zoom In">A+</button>
+                                       </div>
+                                       <button
+                                           onClick={handleRotatePdf}
+                                           className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black transition-all border ${isLandscapePdf ? 'bg-green-400 text-white border-green-400 shadow-sm' : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'}`}
+                                           title="Screen Rotate"
+                                       >
+                                           <RotateCcw size={11} /> Rot
                                        </button>
                                        <button
                                            onClick={() => {
                                                const htmlContent = deepDiveTopics.map(t => `<h2>${t.title}</h2>${t.content}`).join('<hr/>');
-                                               saveOfflineItem({
-                                                   id: `deep_dive_${chapter.id}`,
-                                                   type: 'NOTE',
-                                                   title: 'Deep Dive Notes',
-                                                   subtitle: `${subject.name} - ${chapter.title}`,
-                                                   data: { html: htmlContent }
-                                               });
+                                               saveOfflineItem({ id: `deep_dive_${chapter.id}`, type: 'NOTE', title: 'Deep Dive Notes', subtitle: `${subject.name} - ${chapter.title}`, data: { html: htmlContent } });
                                                setAlertConfig({isOpen: true, message: 'Deep Dive Notes Saved Offline! Access them in the History tab.'});
                                            }}
                                            className="p-1.5 rounded-full text-slate-600 hover:bg-slate-100 transition-colors"
-                                           title="Save offline"
                                            aria-label="Save offline"
                                        >
                                            <Download size={14} />
                                        </button>
+                                       {deepDiveViewMode === 'html' && (
+                                           <button
+                                               onClick={async () => {
+                                                   try {
+                                                       const safeTitle = (chapter.title || 'DeepDive').replace(/[^a-z0-9]/gi, '_').substring(0, 40);
+                                                       const tempDiv = document.createElement('div');
+                                                       tempDiv.id = 'deep-dive-dl-all';
+                                                       tempDiv.style.cssText = 'position:absolute;left:-9999px;padding:16px;background:white;font-family:sans-serif;';
+                                                       tempDiv.innerHTML = deepDiveTopics.map(t => `<h2 style="color:#1e293b;margin-top:24px">${t.title}</h2>${t.content}`).join('<hr style="margin:16px 0"/>');
+                                                       document.body.appendChild(tempDiv);
+                                                       await downloadAsMHTML('deep-dive-dl-all', safeTitle, { pageTitle: chapter.title, subtitle: 'Deep Dive Notes — IIC' });
+                                                       setTimeout(() => { try { document.body.removeChild(tempDiv); } catch {} }, 2000);
+                                                   } catch {}
+                                               }}
+                                               className="flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-black bg-teal-600 text-white border border-teal-600 shadow-sm active:scale-95 transition-all"
+                                               title="Download Notes as File"
+                                           >
+                                               <Download size={11} /> DL
+                                           </button>
+                                       )}
                                        <button
-                                          onClick={() => {
-                                              if (isAutoPlaying) {
-                                                  setIsAutoPlaying(false);
-                                                  stopSpeech();
-                                              } else {
-                                                  setIsAutoPlaying(true);
-                                                  setActiveTopicIndex(0);
-                                              }
-                                          }}
-                                          className={`flex items-center gap-1 px-2.5 py-1 rounded-full font-bold text-[10px] uppercase tracking-wider transition-all ${isAutoPlaying ? 'bg-red-500 text-white animate-pulse' : 'bg-teal-600 text-white shadow-sm'}`}
-                                          title={isAutoPlaying ? 'Stop reading' : 'Read all topics in sequence'}
-                                      >
-                                          {isAutoPlaying ? <Pause size={11} /> : <Volume2 size={11} />}
-                                          {isAutoPlaying ? 'Stop' : 'Read All'}
-                                      </button>
+                                           onClick={() => {
+                                               if (isAutoPlaying) { setIsAutoPlaying(false); stopSpeech(); }
+                                               else { const hasPos = lastReadTopicIdx > 0 || (lastReadLineMap[0] ?? 0) > 0; setIsAutoPlaying(true); setActiveTopicIndex(hasPos ? lastReadTopicIdx : 0); }
+                                           }}
+                                           className={`flex items-center gap-1 px-2.5 py-1 rounded-full font-bold text-[10px] uppercase tracking-wider transition-all ${isAutoPlaying ? 'bg-red-500 text-white animate-pulse' : 'bg-teal-600 text-white shadow-sm'}`}
+                                       >
+                                           {isAutoPlaying ? <><Pause size={11} /> Stop</> : <><Volume2 size={11} /> {lastReadTopicIdx > 0 || (lastReadLineMap[0] ?? 0) > 0 ? 'Resume' : 'Read All'}</>}
+                                       </button>
                                    </div>
+                                   )}
                                </div>
+                               )}
+
 
                                {deepDiveTopics.length === 0 && (
-                                   <div className="text-center py-12 text-slate-500">
-                                       <BookOpen size={48} className="mx-auto mb-4 opacity-20" />
-                                       <p className="text-sm font-bold">No Deep Dive content available.</p>
+                                   <div className="text-center py-16 text-slate-400">
+                                       <p className="text-lg font-bold">Coming Soon</p>
                                    </div>
                                )}
 
@@ -1757,18 +2022,24 @@ export const PdfView: React.FC<Props> = ({
                                           setActiveNoteContent({ title, content: noteContent, audioUrl });
                                       }
                                   };
-                                  return (
+                                  const isLastReadCard = idx === lastReadTopicIdx && ((lastReadLineMap[idx] ?? 0) > 0 || idx > 0);
+                                 return (
                                       <div
                                           id={`topic-card-${idx}`}
                                           key={idx}
-                                          className={`bg-white rounded-none sm:rounded-2xl p-3 sm:p-5 shadow-sm border-2 transition-all w-full ${isActive ? 'border-teal-400 ring-2 ring-teal-100 scale-[1.01] sm:scale-100' : 'border-transparent'}`}
+                                          className={`bg-white rounded-none sm:rounded-2xl p-3 sm:p-5 shadow-sm border-2 transition-all w-full ${isActive ? 'border-teal-400 ring-2 ring-teal-100 scale-[1.01] sm:scale-100' : isLastReadCard ? 'border-indigo-300 ring-1 ring-indigo-100' : 'border-transparent'}`}
                                       >
                                           {/* Compact card header — section badge + title + lightweight
                                               icon-only PDF/Audio buttons. Earlier the badge + Read All +
                                               View PDF + Premium Audio + ChunkedNotesReader's own bar
                                               stacked to ~120px above any actual notes. */}
                                           <div className="flex justify-between items-center mb-2 gap-2">
-                                              <div className="min-w-0 flex items-center gap-2">
+                                              <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                                                  {isLastReadCard && (
+                                                      <span className="text-[9px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded shrink-0 border border-indigo-200">
+                                                          ↩ Last Read
+                                                      </span>
+                                                  )}
                                                   {idx === 0 && topic.title !== "Introduction" && (
                                                       <span className="text-[9px] font-bold text-teal-600 bg-teal-50 px-1.5 py-0.5 rounded shrink-0">
                                                           DEEP DIVE
@@ -1808,25 +2079,29 @@ export const PdfView: React.FC<Props> = ({
                                               </div>
                                           </div>
                                           {topic.content && topic.content.trim() !== '<p></p>' && (
-                                              // Competition-style chunked reader. We hide the inner top
-                                              // bar (font/colour/Read All) because the outer "Read All"
-                                              // pill already drives chained-topic playback, and tap-to-
-                                              // read on each line still works without that bar — saving
-                                              // a duplicate ~50px sticky strip on every card.
-                                              //
-                                              // AUTO-PLAY HOOK-UP: when the page-level Read All is on
-                                              // and this card is the current topic, we set `autoStart`
-                                              // so ChunkedNotesReader plays its own line-by-line TTS
-                                              // (with highlight + auto-scroll). On `onComplete` we move
-                                              // to the next topic — chaining all Concept sections in
-                                              // sequence with proper per-line UX, not one giant blob.
+                                              deepDiveViewMode === 'html' ? (
+                                                  /* ── Write Mode: Smart HTML rendered view ── */
+                                                  <div>
+                                                      <div
+                                                          id={`pdf-html-${idx}`}
+                                                          className="notes-html-content px-3 sm:px-5 py-3"
+                                                          style={{ fontSize: `${Math.round(15 * writeZoom)}px`, lineHeight: '1.8' }}
+                                                          dangerouslySetInnerHTML={{ __html: topic.content }}
+                                                      />
+                                                  </div>
+                                              ) : (
+                                              /* ── Read Mode: ChunkedNotesReader TTS ── */
                                               <div className="-mx-3 sm:-mx-5">
+                                                  {/* Rotate button is now in top bar */}
                                                   <ChunkedNotesReader
                                                       content={topic.content}
                                                       topBarLabel={topic.title}
                                                       noteKey={`pdfview_${chapter.id}_topic_${idx}`}
                                                       hideTopBar
+                                                      preferChunkMode
                                                       autoStart={isAutoPlaying && activeTopicIndex === idx}
+                                                      initialIndex={lastReadLineMap[idx] ?? null}
+                                                      onPositionChange={(lineIdx) => saveReadPosition(idx, lineIdx)}
                                                       onComplete={() => {
                                                           if (!isAutoPlaying) return;
                                                           if (idx + 1 < deepDiveTopics.length) {
@@ -1836,8 +2111,11 @@ export const PdfView: React.FC<Props> = ({
                                                               setTopicSpeakingState(null);
                                                           }
                                                       }}
+                                                      hideDesktopToggle={syllabusMode === 'COMPETITION'}
+                                                      suppressStickyControls={isImmersive}
                                                   />
                                               </div>
+                                              )
                                           )}
 
                                           {/* === PAIRED ADDITIONAL NOTE (inline Read More) ===
@@ -1964,6 +2242,21 @@ export const PdfView: React.FC<Props> = ({
                                                                           aria-pressed={readMoreThemeId === t.id}
                                                                       />
                                                                   ))}
+                                                                  <div className="flex-1"></div>
+                                                                  <div className="flex items-center gap-1">
+                                                                       <button
+                                                                           onClick={(e) => { e.stopPropagation(); stopSpeech(); setIsAutoPlaying(false); setDeepDiveViewMode('chunk'); }}
+                                                                           className={`flex items-center gap-0.5 px-2 py-0.5 rounded-md text-[9px] font-black transition-all border ${deepDiveViewMode === 'chunk' ? 'bg-amber-400 text-white border-amber-400 shadow-sm' : 'bg-slate-100/50 text-slate-500 border-slate-200 hover:bg-slate-200'}`}
+                                                                       >
+                                                                           <Volume2 size={9} /> Read
+                                                                       </button>
+                                                                       <button
+                                                                           onClick={(e) => { e.stopPropagation(); handleWriteModeClick(); }}
+                                                                           className={`flex items-center gap-0.5 px-2 py-0.5 rounded-md text-[9px] font-black transition-all border ${deepDiveViewMode === 'html' ? 'bg-teal-400 text-white border-teal-400 shadow-sm' : 'bg-slate-100/50 text-slate-500 border-slate-200 hover:bg-slate-200'}`}
+                                                                       >
+                                                                           <FileText size={9} /> Write
+                                                                       </button>
+                                                                  </div>
                                                               </div>
 
                                                               {/* CHUNKED CONTENT — each Hindi-danda sentence /
@@ -1973,11 +2266,21 @@ export const PdfView: React.FC<Props> = ({
                                                                   size + read-all + line color controls in addition
                                                                   to our wrapper theme. */}
                                                               <div className={`px-1 py-1 ${readMoreTheme.bg} ${readMoreTheme.text}`}>
-                                                                  <ChunkedNotesReader
-                                                                      content={noteContent}
-                                                                      noteKey={`pdfview_${chapter.id}_addnote_inline_${idx}_${readMoreThemeId}`}
-                                                                      textColorOverride={readMoreTheme.textHex}
-                                                                  />
+                                                                  {deepDiveViewMode === 'html' ? (
+                                                                      <div
+                                                                          className="notes-html-content px-3 sm:px-5 py-3"
+                                                                          style={{ fontSize: `${Math.round(15 * writeZoom)}px`, lineHeight: '1.8', color: readMoreTheme.textHex }}
+                                                                          dangerouslySetInnerHTML={{ __html: noteContent }}
+                                                                      />
+                                                                  ) : (
+                                                                      <ChunkedNotesReader
+                                                                          content={noteContent}
+                                                                          noteKey={`pdfview_${chapter.id}_addnote_inline_${idx}_${readMoreThemeId}`}
+                                                                          textColorOverride={readMoreTheme.textHex}
+                                                                          hideTopBar={hideHeader}
+                                                                          preferChunkMode
+                                                                      />
+                                                                  )}
                                                               </div>
                                                           </div>
                                                       )}
@@ -1987,6 +2290,23 @@ export const PdfView: React.FC<Props> = ({
                                       </div>
                                   );
                               })}
+
+                                           {/* Floating immersive button for Competition mode */}
+                                           {syllabusMode === 'COMPETITION' && (
+                                               <div className="fixed bottom-24 right-4 z-[9999]">
+                                                   <button
+                                                       onClick={() => {
+                                                           const next = !isImmersive;
+                                                           setIsImmersive(next);
+                                                           try { if (typeof onImmersiveChange === 'function') onImmersiveChange(next); } catch {}
+                                                       }}
+                                                       className={`w-12 h-12 rounded-full shadow-xl flex items-center justify-center text-white ${isImmersive ? 'bg-slate-900' : 'bg-blue-600'}`}
+                                                       title={isImmersive ? 'Exit Focus' : 'Focus — Hide UI'}
+                                                   >
+                                                       {isImmersive ? '↩' : '★'}
+                                                   </button>
+                                               </div>
+                                           )}
                            </>
                         );
                    })()}
@@ -1995,7 +2315,7 @@ export const PdfView: React.FC<Props> = ({
 
            {/* 3. PREMIUM NOTES (PDF + TTS) */}
            {activeTab === 'PREMIUM' && (
-               <div className="h-[calc(100vh-140px)] flex flex-col premium-slides-container">
+               <div className={`${pdfFullscreen ? 'h-screen' : 'h-[calc(100vh-140px)]'} flex flex-col premium-slides-container`}>
                    {(() => {
                         const access = getTabAccess('PREMIUM');
 
@@ -2112,12 +2432,22 @@ export const PdfView: React.FC<Props> = ({
                                                <div className={`relative w-full h-full ${virtualList.length > 1 ? 'pt-14' : ''}`}>
                                                    {pdfLink ? (
                                                        <div
-                                                         className="relative w-full h-full flex items-center justify-center overflow-hidden bg-slate-900"
+                                                         className="relative w-full h-full flex items-center justify-center bg-slate-900"
+                                                         style={{ overflow: 'auto' }}
                                                          onTouchStart={handleTouchStart}
                                                          onTouchMove={handleTouchMove}
                                                          onTouchEnd={() => handleTouchEnd(virtualList.length)}
                                                        >
-                                                            <div className="absolute top-0 left-0 w-full h-full flex items-center justify-center overflow-hidden">
+                                                            <div
+                                                                className="flex items-center justify-center"
+                                                                style={{
+                                                                    width: zoom !== 1 ? `${zoom * 100}%` : '100%',
+                                                                    height: zoom !== 1 ? `${zoom * 100}%` : '100%',
+                                                                    minWidth: '100%',
+                                                                    minHeight: '100%',
+                                                                    transition: 'width 0.2s, height 0.2s',
+                                                                }}
+                                                            >
                                                                 <iframe
                                                                     src={formattedLink}
                                                                     className="border-none transition-transform duration-300"
@@ -2127,10 +2457,6 @@ export const PdfView: React.FC<Props> = ({
                                                                     style={
                                                                         pdfRotation === 0 ? { width: '100%', height: '100%' }
                                                                         : pdfRotation === 180 ? { width: '100%', height: '100%', transform: 'rotate(180deg)', transformOrigin: 'center center' }
-                                                                        // 90°/270°: iframe ki visual width = container ki height bani jaati
-                                                                        // hai (aur vice-versa). Isliye iframe ko parent ke OPPOSITE dimensions
-                                                                        // de ke rotate karte hain — rotate ke baad woh container ke andar
-                                                                        // perfectly fit ho jaata hai.
                                                                         : { width: 'var(--pdf-rot-w, 100%)', height: 'var(--pdf-rot-h, 100%)', transform: `rotate(${pdfRotation}deg)`, transformOrigin: 'center center' }
                                                                     }
                                                                     ref={(el) => {
@@ -2158,47 +2484,6 @@ export const PdfView: React.FC<Props> = ({
                                                        </div>
                                                    )}
 
-                                                   {/* TTS / AUDIO TOGGLE — pehle yeh button bottom-right me ek
-                                                       white pill ke roop me float karta tha (PDF ke neeche ka
-                                                       content cover karta tha). Ab top-right me uthaake floating
-                                                       chip group (Back / Rotate / Minimize) ke saath same dark
-                                                       glassmorphic style me align kar diya — professional aur
-                                                       concentrated control surface. Fullscreen me chip group ke
-                                                       LEFT me sit karta hai (right offset ~152px), non-fullscreen
-                                                       me PDF container ke top-right me. */}
-                                                   {(ttsHtml && ttsHtml.length > 10) && (
-                                                       <button
-                                                          onClick={() => {
-                                                              if (isAutoPlaying) {
-                                                                  stopAllSpeech();
-                                                              } else {
-                                                                  // START PLAYBACK
-                                                                  const topics = extractTopicsFromHtml(ttsHtml);
-                                                                  let chunks: string[] = [];
-
-                                                                  if (topics.length > 0 && topics[0].title !== "Notes") {
-                                                                      chunks = topics.map(t => `${t.title}. ${t.content}`);
-                                                                  } else {
-                                                                      const rawText = topics[0].content;
-                                                                      if (rawText.length > 4000) {
-                                                                          chunks = rawText.match(/[^.!?]+[.!?]+/g) || [rawText];
-                                                                      } else {
-                                                                          chunks = [rawText];
-                                                                      }
-                                                                  }
-
-                                                                  setPremiumChunks(chunks);
-                                                                  setPremiumChunkIndex(0);
-                                                                  setIsAutoPlaying(true);
-                                                              }
-                                                          }}
-                                                          className={`absolute top-3 ${pdfFullscreen ? 'right-[152px]' : 'right-3'} z-20 p-2 rounded-full backdrop-blur shadow-lg border border-white/20 transition-all ${isAutoPlaying ? 'bg-red-500 text-white animate-pulse' : 'bg-black/55 text-white hover:bg-indigo-600'}`}
-                                                          title={isAutoPlaying ? 'Stop reading aloud' : 'Read this PDF aloud (TTS)'}
-                                                          aria-label={isAutoPlaying ? 'Stop TTS' : 'Start TTS'}
-                                                      >
-                                                          {isAutoPlaying ? <Pause size={16} /> : <Headphones size={16} />}
-                                                      </button>
-                                                   )}
                                                </div>
                                            </div>
                                        );
@@ -2308,14 +2593,32 @@ export const PdfView: React.FC<Props> = ({
                                            )}
                                        </div>
                                    </header>
-                                   {/* ChunkedNotesReader apna "Read All" / "Stop" button khud render
-                                       karta hai (top bar visible) — har bullet / Hindi-danda line
-                                       tappable hoti hai aur sequentially read hoti hai. */}
-                                   <div className="p-2 sm:p-4 overflow-y-auto teacher-guide-container">
-                                       <ChunkedNotesReader
-                                           content={currentNote.content}
-                                           topBarLabel={currentNote.title || 'Teaching Strategy'}
-                                           noteKey={`pdfview_${chapter.id}_strategy_${currentStrategyIndex}`}
+                                   {/* Teacher Strategy — HTML renderer. Content seedha
+                                       dangerouslySetInnerHTML se render hota hai taaki
+                                       colored headings, tables, bold text sab dikhe.
+                                       TTS ke liye HTML strip karke plain text padha jaata hai. */}
+                                   <div className="overflow-y-auto teacher-guide-container">
+                                       <div className="sticky top-0 z-10 bg-white border-b border-slate-200 flex items-center justify-between gap-2 px-3 py-2 shadow-sm">
+                                           <span className="text-xs font-bold text-slate-600 truncate">{currentNote.title || 'Teaching Strategy'}</span>
+                                           <button
+                                               onClick={() => {
+                                                   if (isTeacherReading) {
+                                                       stopSpeech();
+                                                       setIsTeacherReading(false);
+                                                   } else {
+                                                       const plainText = stripHtml(currentNote.content || '');
+                                                       setIsTeacherReading(true);
+                                                       speakText(plainText, undefined, 1.0, 'hi-IN', undefined, () => setIsTeacherReading(false));
+                                                   }
+                                               }}
+                                               className={`shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider shadow-sm active:scale-95 transition ${isTeacherReading ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
+                                           >
+                                               {isTeacherReading ? <><Square size={13} /> Stop</> : <><Volume2 size={13} /> Read All</>}
+                                           </button>
+                                       </div>
+                                       <div
+                                           className="p-2 sm:p-4"
+                                           dangerouslySetInnerHTML={{ __html: currentNote.content || '' }}
                                        />
                                    </div>
                                </article>
@@ -2519,6 +2822,30 @@ export const PdfView: React.FC<Props> = ({
 
        {/* CONFIRMATION & INFO MODALS ... */}
        {pendingPdf && <CreditConfirmationModal title="Unlock Content" cost={pendingPdf.price} userCredits={user.credits} isAutoEnabledInitial={!!user.isAutoDeductEnabled} onCancel={() => setPendingPdf(null)} onConfirm={(auto) => processPaymentAndOpen(pendingPdf.link, pendingPdf.price, auto, pendingPdf.tts, pendingPdf.type === 'DEEP_DIVE')} />}
+       {writeModePendingCost > 0 && (
+         <CreditConfirmationModal
+           title="Write Mode Unlock"
+           cost={writeModePendingCost}
+           userCredits={user.credits}
+           isAutoEnabledInitial={!!user.isAutoDeductEnabled}
+           onCancel={() => setWriteModePendingCost(0)}
+           onConfirm={() => {
+             const todayStr = new Date().toDateString();
+             const dailyCount = (user.dailyWriteDate === todayStr) ? (user.dailyWriteCount ?? 0) : 0;
+             const updatedUser = {
+               ...user,
+               credits: user.credits - writeModePendingCost,
+               dailyWriteDate: todayStr,
+               dailyWriteCount: dailyCount + 1,
+             };
+             localStorage.setItem('nst_current_user', JSON.stringify(updatedUser));
+             saveUserToLive(updatedUser);
+             onUpdateUser(updatedUser);
+             setWriteModePendingCost(0);
+             stopSpeech(); setIsAutoPlaying(false); setDeepDiveViewMode('html');
+           }}
+         />
+       )}
     </div>
   );
 };
