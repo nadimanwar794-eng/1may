@@ -54,18 +54,23 @@ service cloud.firestore {
       // Any authenticated user can READ the code to verify it during redemption
       allow read: if isAuthenticated();
 
-      // Only admins can CREATE or DELETE codes
-      allow create, delete: if isAdmin();
+      // Admins can CREATE or DELETE any code.
+      // Students can CREATE auto-generated engagement-reward codes for themselves.
+      allow create: if isAdmin() || (
+        isAuthenticated() &&
+        request.resource.data.get('generatedBy', '') == 'ENGAGEMENT_REWARD' &&
+        request.resource.data.get('forUserId', '') == request.auth.uid
+      );
 
-      // Users can UPDATE the code ONLY to increment usage or add their ID (Redemption process)
+      allow delete: if isAdmin();
+
+      // Users can UPDATE the code ONLY to increment usage or add their ID (Redemption process).
       // This prevents them from modifying the reward amount or changing other code properties.
       // Allow a few harmless optional fields (timestamps) so the dual-DB sync from RTDB
       // doesn't get blocked when the snapshot includes them.
       allow update: if isAuthenticated() && (
         isAdmin() ||
-        (
-           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usedCount', 'isRedeemed', 'redeemedBy', 'lastRedeemedAt', 'updatedAt'])
-        )
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usedCount', 'isRedeemed', 'redeemedBy', 'lastRedeemedAt', 'updatedAt'])
       );
     }
 

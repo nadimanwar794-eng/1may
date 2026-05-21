@@ -147,10 +147,18 @@ interface Props {
   onSpendCredits?: (amount: number) => void;
   /** Called whenever HTML view is successfully opened (free OR after credits unlock). Use to track Basic-user daily quota. */
   onHtmlOpen?: () => void;
+  /** Called when user taps "Upgrade" in the Ultra-required prompt. */
+  onUpgradeClick?: () => void;
+  /** True if the user is on the Basic plan (can view Ultra notes with daily limit). */
+  isBasicUser?: boolean;
+  /** How many free Ultra note views are left today for Basic users. */
+  basicHtmlRemaining?: number;
+  /** Called whenever the user switches between chunk/html view inside the reader. */
+  onHtmlViewChange?: (mode: 'chunk' | 'html') => void;
 }
 
 
-export const ChunkedNotesReader: React.FC<Props> = ({ content, className, language = 'hi-IN', topBarLabel, autoStart, onComplete, onReadingStart, hideTopBar, initialIndex, onPositionChange, noteKey, isStarred, onStarToggle, searchQuery, getStarCount, textColorOverride, preferChunkMode, onDesktopModeChange, hideDesktopToggle, suppressStickyControls, htmlContent, isUltraUser, userCredits = 0, htmlUnlockCost = 5, onSpendCredits, onHtmlOpen }) => {
+export const ChunkedNotesReader: React.FC<Props> = ({ content, className, language = 'hi-IN', topBarLabel, autoStart, onComplete, onReadingStart, hideTopBar, initialIndex, onPositionChange, noteKey, isStarred, onStarToggle, searchQuery, getStarCount, textColorOverride, preferChunkMode, onDesktopModeChange, hideDesktopToggle, suppressStickyControls, htmlContent, isUltraUser, userCredits = 0, htmlUnlockCost = 5, onSpendCredits, onHtmlOpen, onUpgradeClick, isBasicUser = false, basicHtmlRemaining = 0, onHtmlViewChange }) => {
   const topics = useMemo(() => splitIntoTopics(content), [content]);
 
   // ── Strips [span_N](start_span) / [span_N](end_span) TTS markers ──
@@ -451,6 +459,8 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
   // User can still toggle to styled HTML view via a button.
   const [htmlViewMode, setHtmlViewMode] = useState<'chunk' | 'html'>(() => preferChunkMode ? 'chunk' : 'html');
   const [showHtmlUnlockPrompt, setShowHtmlUnlockPrompt] = useState(false);
+  // Notify parent whenever the mode changes (so parent can sync download logic)
+  React.useEffect(() => { onHtmlViewChange?.(htmlViewMode); }, [htmlViewMode]);
   // Compute chunk topics from the stripped plain text (for HTML content in chunk mode)
   const htmlChunkTopics = useMemo(() => {
     if (!isHtmlContent || !htmlPlainText) return [];
@@ -1101,21 +1111,143 @@ export const ChunkedNotesReader: React.FC<Props> = ({ content, className, langua
                   </button>
                 ) : (
                   <>
+                    {/* Lock button — Basic users with remaining views get a special tinted button */}
                     <button
                       type="button"
                       onClick={() => setShowHtmlUnlockPrompt(true)}
-                      className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-100 text-slate-400 border border-slate-200 text-[10px] font-black active:scale-95 transition"
-                      title="Ultra plan required"
+                      className={`shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg text-[10px] font-black active:scale-95 transition border ${isBasicUser && basicHtmlRemaining > 0 ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-slate-100 text-slate-400 border-slate-200'}`}
+                      title={isBasicUser && basicHtmlRemaining > 0 ? `${basicHtmlRemaining} free views left today` : 'Ultra plan required'}
                     >
-                      🔒 Ultra
+                      {isBasicUser && basicHtmlRemaining > 0 ? '✨' : '🔒'} Ultra
                     </button>
+
                     {showHtmlUnlockPrompt && (
-                      <div className="fixed inset-0 z-[9999] flex items-center justify-center px-4" style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(6px)' }} onClick={() => setShowHtmlUnlockPrompt(false)}>
-                        <div className="bg-white rounded-3xl p-6 w-full max-w-xs shadow-2xl" onClick={e => e.stopPropagation()}>
-                          <p className="text-3xl text-center mb-2">⚡</p>
-                          <h3 className="font-black text-slate-800 text-center text-base mb-1">Ultra Plan Required</h3>
-                          <p className="text-xs text-slate-500 text-center mb-5">Ye feature sirf Ultra subscribers ke liye hai. Upgrade karke styled HTML notes ka full experience lo.</p>
-                          <button onClick={() => setShowHtmlUnlockPrompt(false)} className="w-full py-2.5 bg-violet-600 text-white rounded-2xl font-black text-sm active:scale-95 transition">OK, Samajh Gaya</button>
+                      <div
+                        className="fixed inset-0 z-[9999] flex items-end justify-center sm:items-center px-4 pb-6 sm:pb-0"
+                        style={{ background: 'rgba(15,23,42,0.65)', backdropFilter: 'blur(8px)' }}
+                        onClick={() => setShowHtmlUnlockPrompt(false)}
+                      >
+                        <div
+                          className="bg-white w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl"
+                          style={{ boxShadow: '0 32px 64px -12px rgba(0,0,0,0.35)' }}
+                          onClick={e => e.stopPropagation()}
+                        >
+                          {/* Header gradient banner */}
+                          {isBasicUser && basicHtmlRemaining <= 0 ? (
+                            /* ── STATE 3: Basic user, limit exhausted ── */
+                            <>
+                              <div className="bg-gradient-to-br from-rose-500 to-orange-500 px-6 pt-7 pb-5 text-center">
+                                <div className="w-14 h-14 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-3 text-3xl">🚫</div>
+                                <h3 className="text-white font-black text-lg leading-tight">Daily Limit Reached</h3>
+                                <p className="text-white/80 text-xs mt-1 font-medium">You've used all your free Ultra note views for today.</p>
+                              </div>
+                              <div className="px-6 py-5">
+                                <div className="bg-rose-50 border border-rose-100 rounded-2xl p-4 mb-5">
+                                  <p className="text-rose-700 text-xs font-bold text-center leading-relaxed">
+                                    Your free quota of <span className="font-black">{basicHtmlRemaining + (basicHtmlRemaining === 0 ? 3 : basicHtmlRemaining)} views/day</span> is fully used.<br />Come back tomorrow or upgrade to Ultra for unlimited access.
+                                  </p>
+                                </div>
+                                <div className="flex gap-3">
+                                  <button
+                                    onClick={() => { setShowHtmlUnlockPrompt(false); onUpgradeClick?.(); }}
+                                    className="flex-1 py-3 bg-gradient-to-r from-violet-600 to-purple-600 text-white rounded-2xl font-black text-sm active:scale-95 transition shadow-md shadow-violet-200"
+                                  >
+                                    👑 Go Ultra
+                                  </button>
+                                  <button
+                                    onClick={() => setShowHtmlUnlockPrompt(false)}
+                                    className="px-5 py-3 bg-slate-100 text-slate-500 rounded-2xl font-black text-sm active:scale-95 transition"
+                                  >
+                                    OK
+                                  </button>
+                                </div>
+                              </div>
+                            </>
+                          ) : isBasicUser && basicHtmlRemaining > 0 ? (
+                            /* ── STATE 2: Basic user, views remaining ── */
+                            <>
+                              <div className="bg-gradient-to-br from-amber-400 to-orange-500 px-6 pt-7 pb-5 text-center">
+                                <div className="w-14 h-14 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-3 text-3xl">✨</div>
+                                <h3 className="text-white font-black text-lg leading-tight">Ultra Notes Preview</h3>
+                                <p className="text-white/85 text-xs mt-1 font-medium">Available on your Basic plan — limited daily access</p>
+                              </div>
+                              <div className="px-6 py-5">
+                                <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 mb-5">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <span className="text-amber-700 text-xs font-black">Today's Free Views</span>
+                                    <span className="bg-amber-500 text-white text-xs font-black px-2.5 py-0.5 rounded-full">{basicHtmlRemaining} left</span>
+                                  </div>
+                                  <div className="w-full bg-amber-200 rounded-full h-1.5">
+                                    <div
+                                      className="bg-amber-500 h-1.5 rounded-full transition-all"
+                                      style={{ width: `${Math.min(100, (basicHtmlRemaining / 3) * 100)}%` }}
+                                    />
+                                  </div>
+                                  <p className="text-amber-600 text-[10px] font-medium mt-2 text-center">Upgrade to Ultra for unlimited styled notes</p>
+                                </div>
+                                <div className="flex gap-3">
+                                  <button
+                                    onClick={() => {
+                                      setShowHtmlUnlockPrompt(false);
+                                      stopAll();
+                                      setHtmlViewMode('html');
+                                      onHtmlOpen?.();
+                                    }}
+                                    className="flex-1 py-3 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-2xl font-black text-sm active:scale-95 transition shadow-md shadow-amber-200"
+                                  >
+                                    ✨ Open Note
+                                  </button>
+                                  <button
+                                    onClick={() => { setShowHtmlUnlockPrompt(false); onUpgradeClick?.(); }}
+                                    className="flex-1 py-3 bg-gradient-to-r from-violet-600 to-purple-600 text-white rounded-2xl font-black text-sm active:scale-95 transition shadow-md shadow-violet-200"
+                                  >
+                                    👑 Ultra
+                                  </button>
+                                </div>
+                                <button
+                                  onClick={() => setShowHtmlUnlockPrompt(false)}
+                                  className="w-full mt-2 py-2 text-slate-400 text-xs font-bold active:scale-95 transition"
+                                >
+                                  Maybe later
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            /* ── STATE 1: Free user, no access ── */
+                            <>
+                              <div className="bg-gradient-to-br from-violet-600 to-purple-700 px-6 pt-7 pb-5 text-center">
+                                <div className="w-14 h-14 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-3 text-3xl">👑</div>
+                                <h3 className="text-white font-black text-lg leading-tight">Ultra Plan Required</h3>
+                                <p className="text-white/80 text-xs mt-1 font-medium">Styled HTML notes are exclusive to Ultra subscribers</p>
+                              </div>
+                              <div className="px-6 py-5">
+                                <div className="space-y-2.5 mb-5">
+                                  {['Beautiful styled notes with formatting', 'Diagrams, tables & rich content', 'Unlimited daily access to all Ultra notes'].map((f, i) => (
+                                    <div key={i} className="flex items-center gap-3">
+                                      <div className="w-5 h-5 rounded-full bg-violet-100 flex items-center justify-center shrink-0">
+                                        <span className="text-violet-600 text-[10px] font-black">✓</span>
+                                      </div>
+                                      <p className="text-slate-600 text-xs font-medium">{f}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                                <div className="flex gap-3">
+                                  <button
+                                    onClick={() => { setShowHtmlUnlockPrompt(false); onUpgradeClick?.(); }}
+                                    className="flex-1 py-3 bg-gradient-to-r from-violet-600 to-purple-600 text-white rounded-2xl font-black text-sm active:scale-95 transition shadow-md shadow-violet-200"
+                                  >
+                                    ⚡ Upgrade to Ultra
+                                  </button>
+                                  <button
+                                    onClick={() => setShowHtmlUnlockPrompt(false)}
+                                    className="px-5 py-3 bg-slate-100 text-slate-500 rounded-2xl font-black text-sm active:scale-95 transition"
+                                  >
+                                    No
+                                  </button>
+                                </div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
                     )}

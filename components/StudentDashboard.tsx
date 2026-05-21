@@ -146,6 +146,7 @@ import {
   ChevronDown,
   ChevronUp,
   Trash2,
+  BarChart2,
 } from "lucide-react";
 import { speakText, stopSpeech, stripHtml } from "../utils/textToSpeech";
 import { getMistakeBankSync, addMistakes, removeMistakeByQuestion } from "../utils/mistakeBank";
@@ -610,6 +611,13 @@ export const StudentDashboard: React.FC<Props> = ({
     const id = window.setInterval(() => setTopBarCreditFlip(v => !v), 2000);
     return () => window.clearInterval(id);
   }, [settings?.specialDiscountEvent?.enabled, isDiscountLive, isDiscountCooldown]);
+
+  const [subBadgeFlip, setSubBadgeFlip] = useState(true);
+  React.useEffect(() => {
+    if (!user.isPremium || !user.subscriptionEndDate || user.subscriptionTier === 'LIFETIME') return;
+    const id = window.setInterval(() => setSubBadgeFlip(v => !v), 2000);
+    return () => window.clearInterval(id);
+  }, [user.isPremium, user.subscriptionEndDate, user.subscriptionTier]);
 
   // Auto-swap: jab discount LIVE ho, profile slot ko Universal Video se replace
   // karna hai, chaahe admin ne `universalVideoInTopBar` set kiya ho ya nahi.
@@ -1286,7 +1294,7 @@ export const StudentDashboard: React.FC<Props> = ({
   const [showContentNewSheet, setShowContentNewSheet] = useState(false);
   const [showCreditsMini, setShowCreditsMini] = useState(false);
   const [storeSubTab, setStoreSubTab] = useState<'STORE' | 'EARN'>('STORE');
-  const [inboxTab, setInboxTab] = useState<'MESSAGES' | 'UPDATES' | 'REWARDS'>('MESSAGES');
+  const [inboxTab, setInboxTab] = useState<'MESSAGES' | 'UPDATES' | 'REWARDS' | 'HISTORY' | 'RULES'>('MESSAGES');
   const [rewardSubTab, setRewardSubTab] = useState<'EARNED' | 'RULES' | 'HISTORY'>('EARNED');
   const [rewardHistorySeenCount, setRewardHistorySeenCount] = useState<number>(() => {
     const saved = localStorage.getItem(`nst_reward_hist_seen_${user?.id || ''}`);
@@ -1492,7 +1500,6 @@ export const StudentDashboard: React.FC<Props> = ({
   });
   const [showAiModal, setShowAiModal] = useState(false);
   const [showHomeworkHistory, setShowHomeworkHistory] = useState(false);
-  const [showSettingsSheet, setShowSettingsSheet] = useState(false);
   const [appLang, setAppLangState] = useAppLang();
   const [isRotateEnabled, setIsRotateEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem('nst_rotate_toggle') === '1'; } catch { return false; }
@@ -1788,8 +1795,10 @@ export const StudentDashboard: React.FC<Props> = ({
   const [lucentMcqAnswers, setLucentMcqAnswers] = useState<Record<string, number>>({});
   // 'html' = styled HTML view (default), 'chunk' = ChunkedNotesReader tappable lines
   const [lucentNotesViewMode, setLucentNotesViewMode] = useState<'html' | 'chunk'>('chunk');
+  // Tracks htmlViewMode inside ChunkedNotesReader (for download sync without unmounting reader)
+  const [lucentChunkHtmlMode, setLucentChunkHtmlMode] = useState<'chunk' | 'html'>('chunk');
   // Reset both tabs + view mode when page or note changes
-  useEffect(() => { setLucentActiveTab('NOTES'); setLucentNotesViewMode('chunk'); }, [lucentPageIndex, lucentNoteViewer?.id]);
+  useEffect(() => { setLucentActiveTab('NOTES'); setLucentNotesViewMode('chunk'); setLucentChunkHtmlMode('chunk'); }, [lucentPageIndex, lucentNoteViewer?.id]);
   const [hwScrollProgress, setHwScrollProgress] = useState(0);
   const hwScrollContainerRef = useRef<HTMLDivElement>(null);
   const hwScrollSaveTimerRef = useRef<number | null>(null);
@@ -3468,6 +3477,7 @@ export const StudentDashboard: React.FC<Props> = ({
   const [showInbox, setShowInbox] = useState(false);
   const EXPIRY_SOON_MS = 2 * 60 * 60 * 1000; // 2 hours — re-notify when reward is this close to expiry
   const unreadCount = (user.inbox || []).filter((m) => {
+    if (m.type === 'REWARD' || m.type === 'GIFT') return false;
     if (m.isClaimed) return false;
     const now = Date.now();
     const expired = m.expiresAt && new Date(m.expiresAt).getTime() <= now;
@@ -4354,12 +4364,12 @@ export const StudentDashboard: React.FC<Props> = ({
                         /* ── Write Mode: Full-page HTML rendered view ── */
                         <div>
                           {((activeHw as any).htmlNotes || combinedNotes) ? (
-                            <div>
-                              <div style={{ zoom: noteZoom, transformOrigin: 'top left' }}>
+                            <div style={{ overflowX: 'hidden', maxWidth: '100%' }}>
+                              <div style={{ zoom: noteZoom, transformOrigin: 'top left', overflowX: 'hidden' }}>
                                 <div
                                   id="hw-html-download"
                                   className="notes-html-content"
-                                  style={{ fontSize: '15px', lineHeight: '1.8', padding: '0 16px 24px' }}
+                                  style={{ fontSize: '15px', lineHeight: '1.8', padding: '0 16px 24px', overflowX: 'hidden', wordBreak: 'break-word', maxWidth: '100%' }}
                                   dangerouslySetInnerHTML={{ __html: processHtmlForWriteMode((activeHw as any).htmlNotes || combinedNotes || '') }}
                                 />
                               </div>
@@ -4377,9 +4387,12 @@ export const StudentDashboard: React.FC<Props> = ({
                       <ChunkedNotesReader
                         key={`hw-reader-${activeHw.id}-chunk`}
                         isUltraUser={_canViewHtmlFree}
+                        isBasicUser={_isBasicUser}
+                        basicHtmlRemaining={basicHtmlRemaining}
                         userCredits={user.credits || 0}
                         htmlUnlockCost={settings?.htmlUnlockCost ?? 5}
                         onHtmlOpen={_trackBasicHtmlOpen}
+                        onUpgradeClick={() => onTabChange('STORE')}
                         onSpendCredits={(amt) => handleUserUpdate({ ...user, credits: Math.max(0, (user.credits || 0) - amt) })}
                         htmlContent={(() => {
                           const chunkSrc = (activeHw as any).chunkNotes;
@@ -7676,68 +7689,20 @@ export const StudentDashboard: React.FC<Props> = ({
               </div>
             </div>
 
-            {/* DAILY USAGE CARD */}
-            {(() => {
-              const isUltra = user.isPremium && user.subscriptionLevel === 'ULTRA';
-              const isBasic = user.isPremium && user.subscriptionLevel === 'BASIC';
-              const todayStr = new Date().toISOString().split('T')[0];
-              const mcqToday = parseInt(localStorage.getItem(`nst_mcq_daily_total_${todayStr}_${user.id}`) || '0', 10);
-              const storeVisits = parseInt(localStorage.getItem(`nst_store_visits_${user.id}_${todayStr}`) || '0', 10);
-              const htmlSessions = parseInt(localStorage.getItem(`nst_basic_html_${user.id}_${todayStr}`) || '0', 10);
-              const tierLabel = isUltra ? 'Ultra ⚡' : isBasic ? 'Basic 🔵' : 'Free 🆓';
-              const tierColor = isUltra ? 'from-violet-500 to-purple-600' : isBasic ? 'from-sky-500 to-blue-600' : 'from-slate-400 to-slate-500';
-              return (
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                  <div className="px-4 pt-3 pb-2 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">📊</span>
-                      <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Daily Usage</p>
-                    </div>
-                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-full text-white bg-gradient-to-r ${tierColor}`}>{tierLabel}</span>
-                  </div>
-                  <div className="divide-y divide-slate-100">
-                    <div className="px-4 py-2.5 flex items-center gap-3">
-                      <span className="text-base shrink-0">📝</span>
-                      <p className="flex-1 text-[11px] font-bold text-slate-600">MCQ Practiced</p>
-                      <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">{mcqToday} done</span>
-                    </div>
-                    <div className="px-4 py-2.5 flex items-center gap-3">
-                      <span className="text-base shrink-0">✍️</span>
-                      <p className="flex-1 text-[11px] font-bold text-slate-600">Write Mode</p>
-                      <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
-                        {isUltra ? '∞ Free' : isBasic ? `${htmlSessions} used` : `${settings?.htmlUnlockCost ?? 5} CR/session`}
-                      </span>
-                    </div>
-                    <div className="px-4 py-2.5 flex items-center gap-3">
-                      <span className="text-base shrink-0">🏬</span>
-                      <p className="flex-1 text-[11px] font-bold text-slate-600">Store Visits</p>
-                      <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">{storeVisits} today</span>
-                    </div>
-                    <div className="px-4 py-2.5 flex items-center gap-3">
-                      <span className="text-base shrink-0">💰</span>
-                      <p className="flex-1 text-[11px] font-bold text-slate-600">Credits Balance</p>
-                      <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${(user.credits||0)>=20?'bg-emerald-100 text-emerald-700':(user.credits||0)>0?'bg-amber-100 text-amber-700':'bg-rose-100 text-rose-600'}`}>{user.credits||0} CR</span>
-                    </div>
-                  </div>
-                  <div className="px-4 py-3 flex gap-2">
-                    <button
-                      onClick={() => setShowFeatureLimitsModal(true)}
-                      className="flex-1 py-2 rounded-xl bg-gradient-to-r from-slate-100 to-slate-200 text-slate-600 text-[10px] font-black active:scale-95 transition border border-slate-200"
-                    >
-                      🔑 View All Limits
-                    </button>
-                    {!isUltra && (
-                      <button
-                        onClick={() => onTabChange('STORE')}
-                        className="flex-1 py-2 rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white text-[10px] font-black active:scale-95 transition"
-                      >
-                        ⚡ Upgrade
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
+            {/* LIMITS BUTTON */}
+            <button
+              onClick={() => setShowFeatureLimitsModal(true)}
+              className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 flex items-center gap-3 w-full active:scale-[0.98] transition-all"
+            >
+              <div className="bg-emerald-50 p-2.5 rounded-xl text-emerald-600 shrink-0">
+                <BarChart2 size={18} />
+              </div>
+              <div className="flex-1 text-left min-w-0">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Daily Limits & Usage</p>
+                <p className="text-sm font-black text-slate-800">View All Limits</p>
+              </div>
+              <ChevronRight size={16} className="text-slate-400 shrink-0" />
+            </button>
 
             {/* ACTION LIST */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden divide-y divide-slate-100">
@@ -7790,20 +7755,6 @@ export const StudentDashboard: React.FC<Props> = ({
 
               {/* Important Notes shortcut moved to bottom-nav (⭐ Important tab). */}
 
-              {/* SETTINGS */}
-              <button
-                onClick={() => setShowSettingsSheet(true)}
-                className="w-full p-4 flex items-center gap-3 hover:bg-slate-50 transition-colors active:bg-slate-100"
-              >
-                <div className="bg-slate-100 w-10 h-10 rounded-xl flex items-center justify-center text-slate-600 shrink-0">
-                  <Settings size={18} />
-                </div>
-                <div className="flex-1 text-left min-w-0">
-                  <p className="text-sm font-bold text-slate-800">Settings</p>
-                  <p className="text-[11px] text-slate-500">Theme, marksheets, recovery & data</p>
-                </div>
-                <ChevronRight size={16} className="text-slate-400 shrink-0" />
-              </button>
 
               {/* TEACHER STORE */}
               <button
@@ -8014,98 +7965,6 @@ export const StudentDashboard: React.FC<Props> = ({
 
           </div>
 
-          {/* SETTINGS SHEET MODAL */}
-          {showSettingsSheet && (() => {
-            // Read current dark theme type once per render so the labels stay in
-            // sync without re-reading localStorage in five different places.
-            const themeType = localStorage.getItem("nst_dark_theme_type"); // 'blue' | 'black' | null
-            const isBlue = isDarkMode && themeType === "blue";
-            const isBlack = isDarkMode && themeType !== "blue";
-            // Sheet background needs an explicit dark colour because the global
-            // `.dark-mode .bg-white` override turns plain `bg-white` to pure
-            // black — that clashed with the blue theme. Pick a softer slate /
-            // dark-blue here so the sheet itself feels native to each theme.
-            const sheetBg = isBlue
-              ? "bg-slate-900 border-t border-blue-900/60"
-              : isBlack
-                ? "bg-zinc-950 border-t border-zinc-800"
-                : "bg-white";
-            const sheetTextStrong = isDarkMode ? "text-slate-100" : "text-slate-800";
-            const sheetTextMuted  = isDarkMode ? "text-slate-300" : "text-slate-600";
-            const cardBg          = isBlue ? "bg-slate-800/70 border-blue-900/60" : isBlack ? "bg-zinc-900 border-zinc-800" : "bg-white border-slate-200 hover:bg-slate-50";
-
-            return (
-            <div className="fixed inset-0 z-[200] flex items-end justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowSettingsSheet(false)}>
-              <div className={`${sheetBg} w-full max-w-lg rounded-t-3xl p-6 shadow-2xl space-y-3 pb-8 animate-in slide-in-from-bottom duration-300`} onClick={e => e.stopPropagation()}>
-                <div className="w-12 h-1.5 bg-slate-400/40 rounded-full mx-auto mb-4"></div>
-                <h3 className={`text-lg font-black mb-4 flex items-center gap-2 ${sheetTextStrong}`}>
-                  <Settings size={18} className={sheetTextMuted} /> {tApp(appLang, 'settings')}
-                </h3>
-
-                {/* LANGUAGE TOGGLE — switches app text (settings, rules, warnings) */}
-                <div className={`w-full p-4 rounded-xl border shadow-sm flex items-center gap-3 transition-all ${cardBg}`}>
-                  <div className={`p-2 rounded-lg ${isDarkMode ? "bg-indigo-500/20" : "bg-indigo-50"}`}>
-                    <Globe size={18} className={isDarkMode ? "text-indigo-300" : "text-indigo-600"} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className={`text-sm font-bold ${sheetTextStrong}`}>{tApp(appLang, 'language')}</p>
-                    <p className={`text-[11px] ${sheetTextMuted}`}>{tApp(appLang, 'language_hint')}</p>
-                  </div>
-                  <div className={`flex p-0.5 rounded-full ${isDarkMode ? "bg-black/30" : "bg-slate-100"}`}>
-                    <button
-                      onClick={() => setAppLangState('EN')}
-                      className={`px-3 py-1 rounded-full text-[11px] font-black transition-all ${appLang === 'EN' ? (isDarkMode ? 'bg-indigo-500 text-white shadow' : 'bg-white text-indigo-700 shadow') : (isDarkMode ? 'text-slate-400' : 'text-slate-500')}`}
-                    >EN</button>
-                    <button
-                      onClick={() => setAppLangState('HI')}
-                      className={`px-3 py-1 rounded-full text-[11px] font-black transition-all ${appLang === 'HI' ? (isDarkMode ? 'bg-indigo-500 text-white shadow' : 'bg-white text-indigo-700 shadow') : (isDarkMode ? 'text-slate-400' : 'text-slate-500')}`}
-                    >हिं</button>
-                  </div>
-                </div>
-
-                {/* LIGHT/DARK MODE TOGGLE */}
-                <button
-                  onClick={() => {
-                    if (!isDarkMode) {
-                      localStorage.setItem("nst_dark_theme_type", "black");
-                      document.documentElement.classList.remove('dark-mode-blue', 'dark-mode-black');
-                      document.documentElement.classList.add('dark-mode', 'dark-mode-black');
-                      onToggleDarkMode && onToggleDarkMode(true);
-                    } else {
-                      const currentType = localStorage.getItem("nst_dark_theme_type");
-                      if (currentType === "black") {
-                        localStorage.setItem("nst_dark_theme_type", "blue");
-                        document.documentElement.classList.remove('dark-mode-black');
-                        document.documentElement.classList.add('dark-mode', 'dark-mode-blue');
-                        onToggleDarkMode && onToggleDarkMode(true);
-                      } else {
-                        document.documentElement.classList.remove('dark-mode', 'dark-mode-blue', 'dark-mode-black');
-                        onToggleDarkMode && onToggleDarkMode(false);
-                      }
-                    }
-                  }}
-                  className={`w-full p-4 rounded-xl border shadow-sm flex items-center gap-3 transition-all ${cardBg}`}
-                >
-                  <div className={`p-2 rounded-lg ${isDarkMode ? "bg-black/30" : "bg-slate-100"}`}>
-                    {isDarkMode ? <Sparkles size={18} className={isBlue ? "text-blue-300" : "text-yellow-400"} /> : <Zap size={18} className="text-slate-600" />}
-                  </div>
-                  <span className={`text-sm font-bold flex-1 text-left ${sheetTextStrong}`}>
-                    {isBlue ? tApp(appLang, 'blue_mode_active') : isBlack ? tApp(appLang, 'black_mode_active') : tApp(appLang, 'light_mode_active')}
-                  </span>
-                  <div className={`w-10 h-6 ${isDarkMode ? 'bg-slate-700' : 'bg-slate-200'} rounded-full flex items-center px-1 overflow-hidden`}>
-                    <div className={`w-4 h-4 rounded-full transition-transform ${isDarkMode ? "translate-x-4 bg-indigo-500" : "bg-white shadow"}`}></div>
-                  </div>
-                </button>
-
-
-
-                <button onClick={() => setShowSettingsSheet(false)} className={`w-full mt-2 text-sm font-bold py-3 ${sheetTextMuted}`}>
-                  {tApp(appLang, 'close')}
-                </button>
-              </div>
-            </div>
-            );
-          })()}
         </div>
       );
 
@@ -8409,22 +8268,28 @@ export const StudentDashboard: React.FC<Props> = ({
 
               {/* Lightning ⚡ — removed from top bar, accessible via 3-dot menu */}
 
-              {/* Mail / Inbox button — notifications + messages + gifts */}
-              <button
-                onClick={() => {
-                  setInboxTab(unreadNotifCount > 0 && unreadCount === 0 ? 'UPDATES' : 'MESSAGES');
-                  setShowInbox(true);
-                }}
-                className="keep-light-badge p-1.5 rounded-full transition-colors relative bg-[#FDFBF7] hover:bg-slate-50 text-slate-800 border border-amber-100 shrink-0"
-                title="Mail & Notifications"
-              >
-                <Mail size={16} />
-                {(unreadCount + unreadNotifCount + _newContentCount) > 0 && (
-                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-0.5 bg-red-500 rounded-full text-[9px] text-white font-black flex items-center justify-center animate-bounce">
-                    {(unreadCount + unreadNotifCount + _newContentCount) > 9 ? '9+' : (unreadCount + unreadNotifCount + _newContentCount)}
-                  </span>
-                )}
-              </button>
+              {/* Mail / Inbox button — always visible */}
+              {(() => {
+                const pendingRewards = (user.inbox || []).filter(m => (m.type === 'REWARD' || m.type === 'GIFT') && !m.isClaimed && (!m.expiresAt || new Date(m.expiresAt).getTime() > Date.now())).length;
+                const totalCount = unreadCount + unreadNotifCount + _newContentCount + pendingRewards;
+                return (
+                  <button
+                    onClick={() => {
+                      setInboxTab(unreadNotifCount > 0 && unreadCount === 0 ? 'UPDATES' : 'MESSAGES');
+                      setShowInbox(true);
+                    }}
+                    className="keep-light-badge p-1.5 rounded-full transition-colors relative bg-[#FDFBF7] hover:bg-slate-50 text-slate-800 border border-amber-100 shrink-0"
+                    title="Mail & Notifications"
+                  >
+                    <Mail size={16} />
+                    {totalCount > 0 && (
+                      <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-0.5 bg-red-500 rounded-full text-[9px] text-white font-black flex items-center justify-center animate-bounce">
+                        {totalCount > 9 ? '9+' : totalCount}
+                      </span>
+                    )}
+                  </button>
+                );
+              })()}
 
 
               {/* 3-DOT MENU BUTTON — in first line, after Mail */}
@@ -8509,26 +8374,6 @@ export const StudentDashboard: React.FC<Props> = ({
                         </div>
                       </div>
 
-                      {/* Subscription Info */}
-                      <div className="px-4 pt-3 pb-2 border-b border-slate-100">
-                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Subscription</p>
-                        <div className="bg-slate-50 rounded-xl p-3 flex items-center justify-between">
-                          <div>
-                            <p className="text-xs font-black text-slate-700">{user.subscriptionTier || 'Free Plan'}</p>
-                            {user.subscriptionEndDate && user.isPremium && (
-                              <p className="text-[10px] text-slate-500 mt-0.5">
-                                Expires: {new Date(user.subscriptionEndDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-                              </p>
-                            )}
-                          </div>
-                          <button
-                            onClick={() => { onTabChange("STORE"); setShowDotsMenu(false); }}
-                            className="text-[10px] font-black bg-gradient-to-r from-indigo-500 to-purple-500 text-white px-3 py-1.5 rounded-full"
-                          >
-                            {user.isPremium ? 'Renew' : 'Upgrade'}
-                          </button>
-                        </div>
-                      </div>
                       {/* Daily Downloads remaining pill */}
                       <div className="px-4 pt-2 pb-1">
                         <div className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 text-[10px] font-bold text-slate-600 border border-slate-100">
@@ -8609,7 +8454,7 @@ export const StudentDashboard: React.FC<Props> = ({
               <div className="shrink-0 w-[72px]">
                 {((settings?.specialDiscountEvent?.enabled && isDiscountCooldown) ? topBarCreditFlip : false) ? (
                   <button
-                    onClick={() => onTabChange("STORE")}
+                    onClick={() => { const todayStr = new Date().toISOString().split('T')[0]; const k = `nst_store_visits_${user.id}_${todayStr}`; try { localStorage.setItem(k, String(parseInt(localStorage.getItem(k) || '0', 10) + 1)); } catch {} onTabChange("STORE"); }}
                     className={`keep-light-badge banner-premium-shimmer inline-flex items-center justify-center gap-1 w-full h-5 px-1 rounded-full shadow-sm text-[7px] font-black hover:scale-105 transition-all duration-500 ease-out whitespace-nowrap shrink-0 border animate-in fade-in zoom-in ${
                       user.subscriptionLevel === 'ULTRA' && user.isPremium
                         ? 'bg-gradient-to-r from-sky-500/25 to-cyan-400/15 text-white border-sky-300/40 shadow-[0_0_12px_rgba(56,189,248,0.25)]'
@@ -8624,7 +8469,7 @@ export const StudentDashboard: React.FC<Props> = ({
                   </button>
                 ) : ((settings?.specialDiscountEvent?.enabled && isDiscountLive) ? topBarCreditFlip : false) ? (
                   <button
-                    onClick={() => onTabChange("STORE")}
+                    onClick={() => { const todayStr = new Date().toISOString().split('T')[0]; const k = `nst_store_visits_${user.id}_${todayStr}`; try { localStorage.setItem(k, String(parseInt(localStorage.getItem(k) || '0', 10) + 1)); } catch {} onTabChange("STORE"); }}
                     className={`keep-light-badge banner-premium-shimmer inline-flex items-center justify-center gap-1 w-full h-5 px-1 rounded-full shadow-sm text-[7px] font-black hover:scale-105 transition-all duration-500 ease-out whitespace-nowrap shrink-0 border animate-in fade-in zoom-in ${
                       user.subscriptionLevel === 'ULTRA' && user.isPremium
                         ? 'bg-gradient-to-r from-sky-500/25 to-cyan-400/15 text-white border-sky-300/40 shadow-[0_0_12px_rgba(56,189,248,0.25)]'
@@ -8639,7 +8484,12 @@ export const StudentDashboard: React.FC<Props> = ({
                   </button>
                 ) : (
                   <button
-                    onClick={() => onTabChange("STORE")}
+                    onClick={() => {
+                      const todayStr = new Date().toISOString().split('T')[0];
+                      const key = `nst_store_visits_${user.id}_${todayStr}`;
+                      try { localStorage.setItem(key, String(parseInt(localStorage.getItem(key) || '0', 10) + 1)); } catch {}
+                      onTabChange("STORE");
+                    }}
                     className={`keep-light-badge banner-premium-shimmer inline-flex items-center justify-center gap-1 w-full h-5 px-1 rounded-full shadow-sm text-[7px] font-black hover:scale-105 transition-all duration-500 ease-out whitespace-nowrap shrink-0 border animate-in fade-in zoom-in ${
                       user.subscriptionLevel === 'ULTRA' && user.isPremium
                         ? 'bg-gradient-to-r from-sky-500/25 to-cyan-400/15 text-white border-sky-300/40 shadow-[0_0_12px_rgba(56,189,248,0.25)]'
@@ -8657,8 +8507,15 @@ export const StudentDashboard: React.FC<Props> = ({
             )}
             {/* Subscription badge */}
             {user.isPremium && (
-              <span className="w-[72px] text-center text-[7px] font-black py-0.5 rounded-full bg-white/20 text-white border border-white/30 whitespace-nowrap shrink-0">
-                {user.subscriptionLevel === 'ULTRA' ? '👑 ULTRA' : user.subscriptionLevel === 'BASIC' ? '⭐ BASIC' : 'PRO'}
+              <span className="w-[72px] text-center text-[7px] font-black py-0.5 rounded-full bg-white/20 text-white border border-white/30 whitespace-nowrap shrink-0 transition-all duration-500">
+                {user.subscriptionEndDate && user.subscriptionTier !== 'LIFETIME' && !subBadgeFlip
+                  ? (() => {
+                      const diff = new Date(user.subscriptionEndDate).getTime() - Date.now();
+                      if (diff <= 0) return '⚠️ Expired';
+                      const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+                      return d === 0 ? '⏳ Today' : `📅 ${d}d left`;
+                    })()
+                  : user.subscriptionLevel === 'ULTRA' ? '👑 ULTRA' : user.subscriptionLevel === 'BASIC' ? '⭐ BASIC' : 'PRO'}
               </span>
             )}
           </div>
@@ -12047,30 +11904,15 @@ export const StudentDashboard: React.FC<Props> = ({
                   ) : (
                     fullLessonText ? (
                       <div>
-                        <button
-                          onClick={async () => {
-                            const safeTitle = (lce.lessonTitle || 'Lesson').replace(/[^a-z0-9]/gi, '_').substring(0, 40);
-                            const tempDiv = document.createElement('div');
-                            tempDiv.id = 'compare-chunk-download-temp';
-                            tempDiv.style.cssText = 'position:fixed;left:0;top:0;width:1024px;background:#fff;padding:32px;color:#0f172a;font-family:Inter,system-ui,sans-serif;font-size:15px;line-height:1.8;white-space:pre-wrap;z-index:-1;';
-                            tempDiv.textContent = fullLessonText;
-                            document.body.appendChild(tempDiv);
-                            await checkAndDoDownload(async () => {
-                              await downloadAsMHTML('compare-chunk-download-temp', safeTitle, { pageTitle: lce.lessonTitle, subtitle: 'Full Lesson Read Mode — IIC' });
-                            });
-                            setTimeout(() => { try { document.body.removeChild(tempDiv); } catch {} }, 2000);
-                          }}
-                          className="flex items-center gap-1.5 mb-2 px-3 py-1.5 rounded-lg text-[11px] font-black bg-amber-500 text-white hover:bg-amber-600 transition-all shadow-sm"
-                          data-export-hide="true"
-                        >
-                          <Download size={12} /> Download (Read Mode)
-                        </button>
                         <ChunkedNotesReader
                           key={`lesson-compare-full-${lce.id}-chunk`}
                           isUltraUser={_canViewHtmlFree}
+                          isBasicUser={_isBasicUser}
+                          basicHtmlRemaining={basicHtmlRemaining}
                           userCredits={user.credits || 0}
                           htmlUnlockCost={settings?.htmlUnlockCost ?? 5}
                           onHtmlOpen={_trackBasicHtmlOpen}
+                          onUpgradeClick={() => onTabChange('STORE')}
                           onSpendCredits={(amt) => handleUserUpdate({ ...user, credits: Math.max(0, (user.credits || 0) - amt) })}
                           content={fullLessonText}
                           topBarLabel={lce.lessonTitle}
@@ -13129,13 +12971,19 @@ export const StudentDashboard: React.FC<Props> = ({
 
             {/* Tabs */}
             <div className="flex gap-1 px-4 pb-3 shrink-0 border-b border-slate-100 overflow-x-auto no-scrollbar">
-              <button
-                onClick={() => setInboxTab('MESSAGES')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'MESSAGES' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-              >
-                <MessageSquare size={11} /> Messages
-                {unreadCount > 0 && <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${inboxTab === 'MESSAGES' ? 'bg-white/20 text-white' : 'bg-red-500 text-white'}`}>{unreadCount}</span>}
-              </button>
+              {(() => {
+                const hasAdminMsgs = (user.inbox || []).some(m => m.type !== 'REWARD' && m.type !== 'GIFT');
+                if (!hasAdminMsgs) return null;
+                return (
+                  <button
+                    onClick={() => setInboxTab('MESSAGES')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'MESSAGES' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                  >
+                    <MessageSquare size={11} /> Messages
+                    {unreadCount > 0 && <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${inboxTab === 'MESSAGES' ? 'bg-white/20 text-white' : 'bg-red-500 text-white'}`}>{unreadCount}</span>}
+                  </button>
+                );
+              })()}
               <button
                 onClick={() => setInboxTab('UPDATES')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'UPDATES' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
@@ -13147,11 +12995,33 @@ export const StudentDashboard: React.FC<Props> = ({
                 onClick={() => setInboxTab('REWARDS')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'REWARDS' ? 'bg-amber-500 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
               >
-                <Trophy size={11} /> Rewards
+                <Trophy size={11} /> Reward
                 {(() => {
                   const cnt = (user.inbox || []).filter(m => m.type === 'REWARD' && !m.isClaimed && (!m.expiresAt || new Date(m.expiresAt).getTime() > Date.now())).length;
                   return cnt > 0 ? <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${inboxTab === 'REWARDS' ? 'bg-white/20 text-white' : 'bg-red-500 text-white'}`}>{cnt}</span> : null;
                 })()}
+              </button>
+              <button
+                onClick={() => {
+                  setInboxTab('HISTORY');
+                  const claimedCnt = (user.inbox || []).filter(m => m.isClaimed).length;
+                  setRewardHistorySeenCount(claimedCnt);
+                  localStorage.setItem(`nst_reward_hist_seen_${user?.id || ''}`, String(claimedCnt));
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'HISTORY' ? 'bg-violet-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                <span className="text-[11px]">📜</span> History
+                {(() => {
+                  const claimedCnt = (user.inbox || []).filter(m => m.isClaimed).length;
+                  const unseen = claimedCnt - rewardHistorySeenCount;
+                  return unseen > 0 ? <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${inboxTab === 'HISTORY' ? 'bg-white/20 text-white' : 'bg-violet-500 text-white'}`}>{unseen}</span> : null;
+                })()}
+              </button>
+              <button
+                onClick={() => setInboxTab('RULES')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all whitespace-nowrap ${inboxTab === 'RULES' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                <span className="text-[11px]">📋</span> Rules
               </button>
             </div>
 
@@ -13160,6 +13030,7 @@ export const StudentDashboard: React.FC<Props> = ({
               {inboxTab === 'MESSAGES' && (() => {
                 const now = Date.now();
                 const msgs = (user.inbox || []).filter(msg => {
+                  if (msg.type === 'REWARD' || msg.type === 'GIFT') return false;
                   if (!msg.expiresAt) return true;
                   if (msg.isClaimed) return true;
                   return new Date(msg.expiresAt).getTime() > now;
@@ -13250,54 +13121,10 @@ export const StudentDashboard: React.FC<Props> = ({
               })()}
 
               {inboxTab === 'REWARDS' && (() => {
-                const engRewards = settings?.engagementRewards || [];
-                const signupAmt = settings?.signupBonus || 0;
-                const loginCfg = settings?.loginBonusConfig;
-                const freeBonus = loginCfg?.freeBonus ?? 2;
-                const basicBonus = loginCfg?.basicBonus ?? 5;
-                const ultraBonus = loginCfg?.ultraBonus ?? 10;
-                const hasAnyLoginBonus = freeBonus > 0 || basicBonus > 0 || ultraBonus > 0;
                 const pendingRewardMsgs = (user.inbox || []).filter(m => m.type === 'REWARD' && !m.isClaimed && (!m.expiresAt || new Date(m.expiresAt).getTime() > Date.now()));
-                const claimedRewardMsgs = (user.inbox || []).filter(m => m.isClaimed).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
                 return (
                   <div className="space-y-3">
-                    {/* Sub-tabs */}
-                    <div className="flex gap-1.5">
-                      <button
-                        onClick={() => setRewardSubTab('EARNED')}
-                        className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-2xl text-[11px] font-black transition-all ${rewardSubTab === 'EARNED' ? 'bg-amber-500 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-                      >
-                        🎁 Mila Reward
-                        {pendingRewardMsgs.length > 0 && (
-                          <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${rewardSubTab === 'EARNED' ? 'bg-white/20 text-white' : 'bg-red-500 text-white'}`}>{pendingRewardMsgs.length}</span>
-                        )}
-                      </button>
-                      <button
-                        onClick={() => setRewardSubTab('RULES')}
-                        className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-2xl text-[11px] font-black transition-all ${rewardSubTab === 'RULES' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-                      >
-                        📋 Rules
-                      </button>
-                      <button
-                        onClick={() => {
-                          setRewardSubTab('HISTORY');
-                          const newCount = claimedRewardMsgs.length;
-                          setRewardHistorySeenCount(newCount);
-                          localStorage.setItem(`nst_reward_hist_seen_${user?.id || ''}`, String(newCount));
-                        }}
-                        className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-2xl text-[11px] font-black transition-all ${rewardSubTab === 'HISTORY' ? 'bg-violet-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-                      >
-                        📜 History
-                        {claimedRewardMsgs.length > rewardHistorySeenCount && (
-                          <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${rewardSubTab === 'HISTORY' ? 'bg-white/20 text-white' : 'bg-violet-500 text-white'}`}>{claimedRewardMsgs.length - rewardHistorySeenCount}</span>
-                        )}
-                      </button>
-                    </div>
-
-                    {/* EARNED sub-tab */}
-                    {rewardSubTab === 'EARNED' && (
-                      <div className="space-y-3">
-                        {/* Credits balance */}
+                    {/* Credits balance */}
                         <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-4 flex items-center justify-between">
                           <div>
                             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Aapke Credits</p>
@@ -13386,156 +13213,212 @@ export const StudentDashboard: React.FC<Props> = ({
                             <p className="text-slate-400 text-xs mt-1">Padhte raho, rewards milenge!</p>
                           </div>
                         )}
+                  </div>
+                );
+              })()}
+
+              {/* ── HISTORY tab ── */}
+              {inboxTab === 'HISTORY' && (() => {
+                const claimedRewardMsgs = (user.inbox || []).filter(m => m.isClaimed).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+                const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+                const recentHistory = claimedRewardMsgs.filter(msg => {
+                  if (!msg.date) return true;
+                  try { return new Date(msg.date).getTime() >= sevenDaysAgo; } catch { return true; }
+                });
+                if (recentHistory.length === 0) return (
+                  <div className="text-center py-14 flex flex-col items-center">
+                    <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4 text-slate-300 text-3xl">📜</div>
+                    <p className="text-slate-500 font-bold text-sm">Koi history nahi abhi</p>
+                    <p className="text-slate-400 text-xs mt-1">Jab bhi reward claim karoge yahan dikhega (7 din tak)</p>
+                  </div>
+                );
+                return (
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Claimed Rewards — Last 7 Days</p>
+                    {recentHistory.map((msg, idx) => {
+                      const claimedAt = msg.date ? new Date(msg.date) : null;
+                      const expiresAt = msg.expiresAt ? new Date(msg.expiresAt) : null;
+                      const expiryMs = expiresAt ? expiresAt.getTime() - nowTick : null;
+                      const isExpired = expiryMs !== null && expiryMs <= 0;
+                      const cdText = !isExpired && expiresAt && !msg.isClaimed ? fmtCountdown(msg.expiresAt!) : null;
+                      return (
+                        <div key={msg.id || idx} className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 flex items-start gap-3">
+                          <div className="w-8 h-8 bg-green-100 rounded-xl flex items-center justify-center shrink-0 text-green-600 mt-0.5">
+                            <CheckCircle size={16} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-bold text-slate-700 leading-snug">{msg.text}</p>
+                            <div className="flex items-center gap-2 mt-1 flex-wrap">
+                              {claimedAt && (
+                                <p className="text-[10px] text-slate-400 font-semibold">
+                                  {(() => { try { return claimedAt.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } })()}
+                                </p>
+                              )}
+                              {cdText && (
+                                <span className="text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
+                                  ⏱ {cdText}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <span className="text-[10px] font-black text-green-600 bg-green-50 border border-green-100 px-2 py-1 rounded-full shrink-0">Claimed</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+
+              {/* ── RULES tab ── */}
+              {inboxTab === 'RULES' && (() => {
+                const engRewards = settings?.engagementRewards || [];
+                const signupAmt = settings?.signupBonus || 0;
+                const loginCfg = settings?.loginBonusConfig;
+                const freeBonus = loginCfg?.freeBonus ?? 2;
+                const basicBonus = loginCfg?.basicBonus ?? 5;
+                const ultraBonus = loginCfg?.ultraBonus ?? 10;
+                const hasAnyLoginBonus = freeBonus > 0 || basicBonus > 0 || ultraBonus > 0;
+
+                const dlFree  = settings?.htmlDownloadLimitFree  ?? 2;
+                const dlBasic = settings?.htmlDownloadLimitBasic ?? 5;
+                const dlUltra = settings?.htmlDownloadLimitUltra ?? 10;
+                const vidBasic = settings?.videoFreeLimitBasic ?? 5;
+                const vidUltra = settings?.videoFreeLimitUltra ?? 10;
+                const pdfBasic = settings?.pdfFreeLimitBasic ?? 5;
+                const pdfUltra = settings?.pdfFreeLimitUltra ?? 10;
+                const htmlCost = settings?.htmlUnlockCost ?? 5;
+                const basicHtmlLimit = settings?.basicHtmlDailyLimit ?? 3;
+
+                type PlanRow = { icon: string; label: string; free: string; basic: string; ultra: string };
+                const planRows: PlanRow[] = [
+                  { icon: '📖', label: 'Notes', free: '✓ Unlimited', basic: '✓ Unlimited', ultra: '✓ Unlimited' },
+                  { icon: '📝', label: 'MCQ Practice', free: '50/day', basic: 'Unlimited', ultra: 'Unlimited' },
+                  { icon: '🎬', label: 'Video Lectures', free: 'Coins needed', basic: `${vidBasic}/day free`, ultra: `${vidUltra}/day free` },
+                  { icon: '📄', label: 'PDF Access', free: 'Coins needed', basic: `${pdfBasic}/day free`, ultra: `${pdfUltra}/day free` },
+                  { icon: '✍️', label: 'Write Mode', free: `${htmlCost} CR/use`, basic: `${basicHtmlLimit}/day free`, ultra: 'Unlimited' },
+                  { icon: '📥', label: 'HTML Downloads', free: `${dlFree}/day`, basic: `${dlBasic}/day`, ultra: `${dlUltra}/day` },
+                  { icon: '🌅', label: 'Daily Login Bonus', free: `+${freeBonus} CR`, basic: `+${basicBonus} CR`, ultra: `+${ultraBonus} CR` },
+                  { icon: '🔊', label: 'Audio / TTS', free: '✓ Free', basic: '✓ Free', ultra: '✓ Free' },
+                ];
+
+                return (
+                  <div className="space-y-2">
+                    {/* PLAN COMPARISON TABLE */}
+                    <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                      <div className="px-3 pt-3 pb-2 flex items-center gap-2 border-b border-slate-100">
+                        <span className="text-base">🏆</span>
+                        <p className="font-black text-sm text-slate-800">Plan Comparison — Free / Basic / Ultra</p>
+                      </div>
+                      {/* Header row */}
+                      <div className="grid grid-cols-4 bg-slate-50 border-b border-slate-100 text-[9px] font-black uppercase tracking-wider text-slate-500">
+                        <div className="px-3 py-2">Feature</div>
+                        <div className="px-2 py-2 text-center text-slate-500">🆓 Free</div>
+                        <div className="px-2 py-2 text-center text-sky-600">🔵 Basic</div>
+                        <div className="px-2 py-2 text-center text-violet-600">⚡ Ultra</div>
+                      </div>
+                      {planRows.map((row, i) => (
+                        <div key={i} className={`grid grid-cols-4 text-[10px] border-b border-slate-50 ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}`}>
+                          <div className="px-3 py-2.5 flex items-center gap-1.5 font-bold text-slate-700">
+                            <span>{row.icon}</span>
+                            <span className="truncate">{row.label}</span>
+                          </div>
+                          <div className="px-2 py-2.5 text-center font-bold text-slate-500">{row.free}</div>
+                          <div className="px-2 py-2.5 text-center font-bold text-sky-700">{row.basic}</div>
+                          <div className="px-2 py-2.5 text-center font-bold text-violet-700">{row.ultra}</div>
+                        </div>
+                      ))}
+                      <div className="px-3 py-2 text-[10px] text-slate-400 font-medium">
+                        📌 Upgrade karo Store mein jaake → ⚡ Ultra / 🔵 Basic
+                      </div>
+                    </div>
+
+                    {signupAmt > 0 && (
+                      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl p-3.5 flex items-center gap-3">
+                        <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0 text-blue-600 text-xl">🎉</div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-black text-sm text-slate-800">Signup Bonus</p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">Sirf pehli baar join karne pe — ek baar milega</p>
+                        </div>
+                        <span className="font-black text-blue-700 text-base shrink-0">+{signupAmt} CR</span>
                       </div>
                     )}
-
-                    {/* RULES sub-tab */}
-                    {rewardSubTab === 'RULES' && (
-                      <div className="space-y-2">
-                        {/* Signup Bonus */}
-                        {signupAmt > 0 && (
-                          <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl p-3.5 flex items-center gap-3">
-                            <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0 text-blue-600 text-xl">🎉</div>
-                            <div className="flex-1 min-w-0">
-                              <p className="font-black text-sm text-slate-800">Signup Bonus</p>
-                              <p className="text-[11px] text-slate-500 mt-0.5">Sirf pehli baar join karne pe — ek baar milega</p>
-                            </div>
-                            <span className="font-black text-blue-700 text-base shrink-0">+{signupAmt} CR</span>
+                    {hasAnyLoginBonus && (
+                      <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-2xl p-3.5 space-y-2">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="w-8 h-8 bg-green-100 rounded-xl flex items-center justify-center shrink-0 text-green-600 text-lg">🌅</div>
+                          <div>
+                            <p className="font-black text-sm text-slate-800">Roz Login Bonus</p>
+                            <p className="text-[10px] text-slate-500">Har roz app kholne pe — sirf 1 baar milega</p>
                           </div>
-                        )}
-                        {/* Daily Login Bonus — per tier */}
-                        {hasAnyLoginBonus && (
-                          <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-2xl p-3.5 space-y-2">
-                            <div className="flex items-center gap-2 mb-1">
-                              <div className="w-8 h-8 bg-green-100 rounded-xl flex items-center justify-center shrink-0 text-green-600 text-lg">🌅</div>
-                              <div>
-                                <p className="font-black text-sm text-slate-800">Roz Login Bonus</p>
-                                <p className="text-[10px] text-slate-500">Har roz app kholne pe — sirf 1 baar milega</p>
-                              </div>
-                            </div>
-                            <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-green-100">
-                              <div className="bg-white rounded-xl p-2 text-center border border-green-100">
-                                <p className="text-[9px] font-black text-slate-400 uppercase">Free</p>
-                                <p className="font-black text-green-700 text-sm mt-0.5">+{freeBonus} CR</p>
-                              </div>
-                              <div className="bg-white rounded-xl p-2 text-center border border-amber-100">
-                                <p className="text-[9px] font-black text-amber-500 uppercase">Basic</p>
-                                <p className="font-black text-amber-700 text-sm mt-0.5">+{basicBonus} CR</p>
-                              </div>
-                              <div className="bg-white rounded-xl p-2 text-center border border-violet-100">
-                                <p className="text-[9px] font-black text-violet-500 uppercase">Ultra</p>
-                                <p className="font-black text-violet-700 text-sm mt-0.5">+{ultraBonus} CR</p>
-                              </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-green-100">
+                          <div className="bg-white rounded-xl p-2 text-center border border-green-100">
+                            <p className="text-[9px] font-black text-slate-400 uppercase">Free</p>
+                            <p className="font-black text-green-700 text-sm mt-0.5">+{freeBonus} CR</p>
+                          </div>
+                          <div className="bg-white rounded-xl p-2 text-center border border-amber-100">
+                            <p className="text-[9px] font-black text-amber-500 uppercase">Basic</p>
+                            <p className="font-black text-amber-700 text-sm mt-0.5">+{basicBonus} CR</p>
+                          </div>
+                          <div className="bg-white rounded-xl p-2 text-center border border-violet-100">
+                            <p className="text-[9px] font-black text-violet-500 uppercase">Ultra</p>
+                            <p className="font-black text-violet-700 text-sm mt-0.5">+{ultraBonus} CR</p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {engRewards.filter(r => r.enabled).map(r => {
+                      const mins = Math.round(r.seconds / 60);
+                      return (
+                        <div key={r.id} className="bg-gradient-to-r from-purple-50 to-violet-50 border border-purple-200 rounded-2xl p-3.5 flex items-center gap-3">
+                          <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center shrink-0 text-purple-600 text-xl">📚</div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-black text-sm text-slate-800">{r.label || `${mins} Min Study Reward`}</p>
+                            <p className="text-[11px] text-slate-500 mt-0.5">{mins} minute padhne pe milega</p>
+                          </div>
+                          <span className="font-black text-purple-700 text-base shrink-0 text-right">
+                            {r.type === 'COINS' ? `+${r.amount} CR` : `${r.subTier || ''} ${r.subLevel || ''}`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {(() => {
+                      const mcqRules = (settings?.mcqRewardRules || []).filter(r => r.enabled);
+                      const minMcq = settings?.mcqDailyMinimum ?? 50;
+                      if (mcqRules.length === 0) return null;
+                      return (
+                        <div className="bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-2xl p-3.5 space-y-2">
+                          <div className="flex items-center gap-2 mb-1">
+                            <div className="w-8 h-8 bg-orange-100 rounded-xl flex items-center justify-center shrink-0 text-orange-600 text-lg">🎯</div>
+                            <div>
+                              <p className="font-black text-sm text-slate-800">MCQ Prize System</p>
+                              <p className="text-[10px] text-slate-500">Daily {minMcq}+ MCQ solve karo aur % ke hisab se prize pao!</p>
                             </div>
                           </div>
-                        )}
-                        {/* Engagement Rewards */}
-                        {engRewards.filter(r => r.enabled).map(r => {
-                          const mins = Math.round(r.seconds / 60);
-                          return (
-                            <div key={r.id} className="bg-gradient-to-r from-purple-50 to-violet-50 border border-purple-200 rounded-2xl p-3.5 flex items-center gap-3">
-                              <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center shrink-0 text-purple-600 text-xl">📚</div>
-                              <div className="flex-1 min-w-0">
-                                <p className="font-black text-sm text-slate-800">{r.label || `${mins} Min Study Reward`}</p>
-                                <p className="text-[11px] text-slate-500 mt-0.5">{mins} minute padhne pe milega</p>
-                              </div>
-                              <span className="font-black text-purple-700 text-base shrink-0 text-right">
-                                {r.type === 'COINS' ? `+${r.amount} CR` : `${r.subTier || ''} ${r.subLevel || ''}`}
-                              </span>
-                            </div>
-                          );
-                        })}
-                        {/* MCQ Reward Rules */}
-                        {(() => {
-                          const mcqRules = (settings?.mcqRewardRules || []).filter(r => r.enabled);
-                          const minMcq = settings?.mcqDailyMinimum ?? 50;
-                          if (mcqRules.length === 0) return null;
-                          return (
-                            <div className="bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-2xl p-3.5 space-y-2">
-                              <div className="flex items-center gap-2 mb-1">
-                                <div className="w-8 h-8 bg-orange-100 rounded-xl flex items-center justify-center shrink-0 text-orange-600 text-lg">🎯</div>
+                          <div className="space-y-1 pt-1 border-t border-orange-100">
+                            {mcqRules.map(r => (
+                              <div key={r.id} className="flex items-center justify-between bg-white rounded-xl px-3 py-2 border border-orange-100">
                                 <div>
-                                  <p className="font-black text-sm text-slate-800">MCQ Prize System</p>
-                                  <p className="text-[10px] text-slate-500">Daily {minMcq}+ MCQ solve karo aur % ke hisab se prize pao!</p>
+                                  <p className="text-xs font-black text-slate-700">{r.label}</p>
+                                  <p className="text-[10px] text-slate-400">{r.minPercentage}%+ marks required</p>
                                 </div>
+                                <span className="text-xs font-black text-orange-700 bg-orange-50 border border-orange-100 px-2 py-1 rounded-full shrink-0">
+                                  {r.rewardType === 'COINS' ? `+${r.rewardAmount} CR` : `${r.rewardSubTier} ${r.rewardSubLevel}`}
+                                </span>
                               </div>
-                              <div className="space-y-1 pt-1 border-t border-orange-100">
-                                {mcqRules.map(r => (
-                                  <div key={r.id} className="flex items-center justify-between bg-white rounded-xl px-3 py-2 border border-orange-100">
-                                    <div>
-                                      <p className="text-xs font-black text-slate-700">{r.label}</p>
-                                      <p className="text-[10px] text-slate-400">{r.minPercentage}%+ marks required</p>
-                                    </div>
-                                    <span className="text-xs font-black text-orange-700 bg-orange-50 border border-orange-100 px-2 py-1 rounded-full shrink-0">
-                                      {r.rewardType === 'COINS' ? `+${r.rewardAmount} CR` : `${r.rewardSubTier} ${r.rewardSubLevel}`}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                              <p className="text-[10px] text-slate-500 pt-1 border-t border-orange-100">
-                                📌 Rules: Daily minimum {minMcq} MCQ solve karna zaroori hai reward ke liye. Competition, Lucent aur Class 6-12 ke saare MCQ count hote hain.
-                              </p>
-                            </div>
-                          );
-                        })()}
-                        {engRewards.filter(r => r.enabled).length === 0 && !hasAnyLoginBonus && signupAmt === 0 && (settings?.mcqRewardRules || []).filter(r => r.enabled).length === 0 && (
-                          <div className="text-center py-10 flex flex-col items-center">
-                            <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-300"><Trophy size={30} /></div>
-                            <p className="text-slate-500 font-bold text-sm">Abhi koi active reward nahi</p>
-                            <p className="text-slate-400 text-xs mt-1">Admin rewards set karega tab yahan dikhenge</p>
+                            ))}
                           </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* HISTORY sub-tab */}
-                    {rewardSubTab === 'HISTORY' && (
-                      <div className="space-y-2">
-                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Sabhi Claimed Rewards (Last 7 Days)</p>
-                        {(() => {
-                          const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-                          const recentHistory = claimedRewardMsgs.filter(msg => {
-                            if (!msg.date) return true;
-                            try { return new Date(msg.date).getTime() >= sevenDaysAgo; } catch { return true; }
-                          });
-                          if (recentHistory.length === 0) return (
-                          <div className="text-center py-10 flex flex-col items-center">
-                            <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-300 text-3xl">📜</div>
-                            <p className="text-slate-500 font-bold text-sm">Koi history nahi abhi</p>
-                            <p className="text-slate-400 text-xs mt-1">Jab bhi reward claim karoge yahan dikhega (7 din tak)</p>
-                          </div>
-                          );
-                          return recentHistory.map((msg, idx) => {
-                          const claimedAt = msg.date ? new Date(msg.date) : null;
-                          const expiresAt = msg.expiresAt ? new Date(msg.expiresAt) : null;
-                          const expiryMs = expiresAt ? expiresAt.getTime() - nowTick : null;
-                          const isExpired = expiryMs !== null && expiryMs <= 0;
-                          const cdText = !isExpired && expiresAt && !msg.isClaimed ? fmtCountdown(msg.expiresAt!) : null;
-                          return (
-                          <div key={msg.id || idx} className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 flex items-start gap-3">
-                            <div className="w-8 h-8 bg-green-100 rounded-xl flex items-center justify-center shrink-0 text-green-600 mt-0.5">
-                              <CheckCircle size={16} />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-bold text-slate-700 leading-snug">{msg.text}</p>
-                              <div className="flex items-center gap-2 mt-1 flex-wrap">
-                                {claimedAt && (
-                                  <p className="text-[10px] text-slate-400 font-semibold">
-                                    {(() => { try { return claimedAt.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } })()}
-                                  </p>
-                                )}
-                                {cdText && (
-                                  <span className="text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
-                                    ⏱ {cdText}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                            <span className="text-[10px] font-black text-green-600 bg-green-50 border border-green-100 px-2 py-1 rounded-full shrink-0">Claimed</span>
-                          </div>
-                          );
-                        });
-                        })()}
+                          <p className="text-[10px] text-slate-500 pt-1 border-t border-orange-100">
+                            📌 Rules: Daily minimum {minMcq} MCQ solve karna zaroori hai reward ke liye.
+                          </p>
+                        </div>
+                      );
+                    })()}
+                    {engRewards.filter(r => r.enabled).length === 0 && !hasAnyLoginBonus && signupAmt === 0 && (settings?.mcqRewardRules || []).filter(r => r.enabled).length === 0 && (
+                      <div className="text-center py-14 flex flex-col items-center">
+                        <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-300"><Trophy size={30} /></div>
+                        <p className="text-slate-500 font-bold text-sm">Abhi koi active reward nahi</p>
+                        <p className="text-slate-400 text-xs mt-1">Admin rewards set karega tab yahan dikhenge</p>
                       </div>
                     )}
                   </div>
@@ -13568,7 +13451,9 @@ export const StudentDashboard: React.FC<Props> = ({
                   setShowInbox(false);
                 };
 
-                if (allNotifications.length === 0 && _newContentFiltered.length === 0) return (
+                const inboxRewardMsgs = (user.inbox || []).filter(m => m.type === 'REWARD' || m.type === 'GIFT').sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+                if (allNotifications.length === 0 && _newContentFiltered.length === 0 && inboxRewardMsgs.length === 0) return (
                   <div className="text-center py-14 flex flex-col items-center">
                     <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4 text-slate-300"><Bell size={32} /></div>
                     <p className="text-slate-500 font-bold text-sm">Koi update nahi</p>
@@ -13620,10 +13505,54 @@ export const StudentDashboard: React.FC<Props> = ({
                       </div>
                     )}
 
+                    {/* ── Inbox Rewards / Gifts ── */}
+                    {inboxRewardMsgs.length > 0 && (
+                      <div className="mb-2">
+                        <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest px-1 mb-2 flex items-center gap-1.5">
+                          <span className="w-4 h-4 bg-amber-100 rounded-full flex items-center justify-center text-[9px]">🎁</span>
+                          Rewards Mila
+                        </p>
+                        {inboxRewardMsgs.map((msg, idx) => {
+                          const isPending = !msg.isClaimed && (!msg.expiresAt || new Date(msg.expiresAt).getTime() > Date.now());
+                          const isExpired = msg.expiresAt && new Date(msg.expiresAt).getTime() < Date.now() && !msg.isClaimed;
+                          return (
+                            <div
+                              key={msg.id || idx}
+                              className={`rounded-2xl border p-3.5 flex items-start gap-3 mb-2 ${isPending ? 'bg-gradient-to-br from-amber-50 to-yellow-50 border-amber-200' : isExpired ? 'bg-slate-50 border-slate-200 opacity-60' : 'bg-emerald-50 border-emerald-200'}`}
+                            >
+                              <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-lg ${isPending ? 'bg-amber-100' : isExpired ? 'bg-slate-100' : 'bg-emerald-100'}`}>
+                                {msg.type === 'GIFT' ? '🎁' : '🏆'}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                                  <p className="font-black text-sm text-slate-800 truncate">{msg.title || (msg.type === 'GIFT' ? 'Gift Mila!' : 'Reward Mila!')}</p>
+                                  {isPending && <span className="text-[9px] font-black bg-amber-500 text-white px-1.5 py-0.5 rounded-full">Pending</span>}
+                                  {msg.isClaimed && <span className="text-[9px] font-black bg-emerald-500 text-white px-1.5 py-0.5 rounded-full">✓ Claimed</span>}
+                                  {isExpired && <span className="text-[9px] font-black bg-slate-400 text-white px-1.5 py-0.5 rounded-full">Expired</span>}
+                                </div>
+                                {msg.text && <p className="text-xs text-slate-500 leading-relaxed line-clamp-2">{msg.text}</p>}
+                                <p className="text-[9px] text-slate-400 mt-1 font-semibold">
+                                  {new Date(msg.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                </p>
+                                {isPending && (
+                                  <button
+                                    onClick={() => { setShowInbox(false); setTimeout(() => { setInboxTab('REWARDS'); setShowInbox(true); }, 100); }}
+                                    className="mt-2 text-[11px] font-black bg-gradient-to-r from-amber-500 to-orange-500 text-white px-3 py-1.5 rounded-full active:scale-95 transition-transform"
+                                  >
+                                    Claim karein →
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
                     {/* ── Admin Announcements ── */}
                     {allNotifications.length > 0 && (
                       <>
-                        {_newContentFiltered.length > 0 && (
+                        {(_newContentFiltered.length > 0 || inboxRewardMsgs.length > 0) && (
                           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1 mb-2 mt-1 flex items-center gap-1.5">
                             <Bell size={10} /> Admin Announcements
                           </p>
@@ -14038,7 +13967,8 @@ export const StudentDashboard: React.FC<Props> = ({
                       const safeTitle = `${entry.lessonTitle || 'Lucent'}_pg${currentPage?.pageNo || safeIndex + 1}`
                         .replace(/[^a-z0-9_\- ]/gi, '_').slice(0, 60);
                       const _dlOkLuc = await checkAndDoDownload(async () => {
-                        if (lucentNotesViewMode === 'html' && (currentPage?.htmlNotes || currentPage?.content)) {
+                        const isHtmlMode = lucentNotesViewMode === 'html' || lucentChunkHtmlMode === 'html';
+                        if (isHtmlMode && (currentPage?.htmlNotes || currentPage?.content)) {
                           await downloadAsMHTML('lucent-html-download', safeTitle, {
                             appName: settings?.appShortName || settings?.appName || 'IIC',
                             pageTitle: `${entry.lessonTitle || 'Lucent'} · Page ${currentPage?.pageNo || safeIndex + 1}`,
@@ -14171,9 +14101,13 @@ export const StudentDashboard: React.FC<Props> = ({
                   <ChunkedNotesReader
                     key={`lucent-reader-${entry.id}-${safeIndex}-${autoSyncOn ? 'auto' : 'manual'}-chunk`}
                     isUltraUser={_canViewHtmlFree}
+                    isBasicUser={_isBasicUser}
+                    basicHtmlRemaining={basicHtmlRemaining}
                     userCredits={user.credits || 0}
                     htmlUnlockCost={settings?.htmlUnlockCost ?? 5}
                     onHtmlOpen={_trackBasicHtmlOpen}
+                    onUpgradeClick={() => onTabChange('STORE')}
+                    onHtmlViewChange={(mode) => setLucentChunkHtmlMode(mode)}
                     onSpendCredits={(amt) => handleUserUpdate({ ...user, credits: Math.max(0, (user.credits || 0) - amt) })}
                     htmlContent={(() => {
                       const chunkSrc = (currentPage as any).chunkNotes;
@@ -14256,6 +14190,18 @@ export const StudentDashboard: React.FC<Props> = ({
                       }
                     )}
                   />
+                  )}
+
+                  {/* Off-screen lucent-html-download container — rendered when ChunkedNotesReader
+                      is in HTML view (lucentChunkHtmlMode='html') so the download button can find it. */}
+                  {lucentNotesViewMode === 'chunk' && lucentChunkHtmlMode === 'html' && (currentPage?.htmlNotes || currentPage?.content) && (
+                    <div
+                      id="lucent-html-download"
+                      className="notes-html-content"
+                      style={{ position: 'fixed', left: '-99999px', top: 0, width: '1100px', background: '#ffffff', padding: '32px', fontSize: '15px', lineHeight: '1.8' }}
+                      aria-hidden="true"
+                      dangerouslySetInnerHTML={{ __html: processHtmlForWriteMode(currentPage.htmlNotes || currentPage.content || '') }}
+                    />
                   )}
 
                   {/* ── Page Continuation Card ────────────────────────────────────── */}

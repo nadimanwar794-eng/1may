@@ -4,8 +4,9 @@ import React, { useState, useEffect } from 'react';
 import { 
   ClassLevel, Subject, Chapter, AppState, Board, Stream, User, ContentType, SystemSettings, ActivityLogEntry, WeeklyTest, LessonContent, ActiveSubscription, InboxMessage
 } from './types';
-import { getChapterData, saveChapterData, checkFirebaseConnection, saveTestResult, saveUserToLive, updateUserStatus, getUserData, subscribeToSettings, subscribeToUser, auth, savePublicActivity, saveUserHistory, getUserSavedNotes, rtdb } from './firebase';
+import { getChapterData, saveChapterData, checkFirebaseConnection, saveTestResult, saveUserToLive, updateUserStatus, getUserData, subscribeToSettings, subscribeToUser, auth, savePublicActivity, saveUserHistory, getUserSavedNotes, rtdb, db } from './firebase';
 import { ref as rtdbRef, set as rtdbSet } from 'firebase/database';
+import { doc as fsDoc, setDoc as fsSetDoc } from 'firebase/firestore';
 import { storage } from './utils/storage';
 import { recalculateSubscriptionStatus, addSubscription } from './utils/subscriptionUtils';
 import { signInAnonymously } from 'firebase/auth';
@@ -1207,6 +1208,9 @@ const App: React.FC = () => {
                     };
                     if (rtdb) {
                         rtdbSet(rtdbRef(rtdb, `redeem_codes/${genCode}`), codeData).catch(() => {});
+                    }
+                    if (db) {
+                        fsSetDoc(fsDoc(db, 'redeem_codes', genCode), codeData).catch(() => {});
                     }
                     // Add code to inbox as special message
                     const codeMsg: any = {

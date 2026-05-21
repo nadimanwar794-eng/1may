@@ -23,6 +23,7 @@
       ".read": "auth != null",
       "$codeId": {
         ".write": "auth != null",
+
         "type":     { ".validate": "!data.exists() || newData.val() === data.val() || root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'SUB_ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'SUB_ADMIN'" },
         "amount":   { ".validate": "!data.exists() || newData.val() === data.val() || root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'SUB_ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'SUB_ADMIN'" },
         "maxUses":  { ".validate": "!data.exists() || newData.val() === data.val() || root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'SUB_ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'SUB_ADMIN'" },
@@ -30,11 +31,19 @@
         "subLevel": { ".validate": "!data.exists() || newData.val() === data.val() || root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'SUB_ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'SUB_ADMIN'" },
         "code":     { ".validate": "!data.exists() || newData.val() === data.val() || root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'SUB_ADMIN' || root.child('nst_users').child(auth.uid).child('role').val() === 'SUB_ADMIN'" },
 
-        "usedCount": { ".validate": "newData.isNumber() && (!data.exists() || newData.val() >= data.val())" },
+        "usedCount":      { ".validate": "newData.isNumber() && (!data.exists() || newData.val() >= data.val())" },
+        "redeemedBy":     { ".validate": "true" },
+        "isRedeemed":     { ".validate": "newData.isBoolean()" },
+        "lastRedeemedAt": { ".validate": "!newData.exists() || newData.isString()" },
+        "updatedAt":      { ".validate": "!newData.exists() || newData.isString()" },
 
-        "redeemedBy": { ".validate": "true" },
-
-        "isRedeemed": { ".validate": "newData.isBoolean()" }
+        "discountPercent": { ".validate": "!newData.exists() || newData.isNumber()" },
+        "contentId":       { ".validate": "!newData.exists() || newData.isString()" },
+        "effectColor":     { ".validate": "!newData.exists() || newData.isString()" },
+        "forUserId":       { ".validate": "!newData.exists() || newData.isString()" },
+        "generatedBy":     { ".validate": "!newData.exists() || newData.isString()" },
+        "createdAt":       { ".validate": "!newData.exists() || newData.isString()" },
+        "expiresAt":       { ".validate": "!newData.exists() || newData.isString()" }
       }
     },
 
